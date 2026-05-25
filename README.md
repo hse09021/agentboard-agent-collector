@@ -1,6 +1,6 @@
-# agentboard — AI Usage Collector
+# Agentboard — AI Agent Usage Collector
 
-AI 코딩 도구(Claude Code, Codex, OpenCode, GitHub Copilot, Gemini CLI)의 토큰 사용량을 자동으로 수집하여 [AI Cost Dashboard](https://agentboard.kro.kr)로 전송하는 경량 CLI 도구입니다.
+AI 코딩 도구(Claude Code, Codex, OpenCode, GitHub Copilot, Gemini CLI)의 토큰 사용량을 자동으로 수집하여 [Agentboard](https://agentboard.kro.kr)로 전송하는 경량 CLI 도구입니다.
 
 ## 특징
 
@@ -21,7 +21,7 @@ npm install -g @agentboard/collector
 또는 저장소를 직접 클론하여 설치:
 
 ```bash
-git clone ...
+git clone https://github.com/hse09021/agentboard-agent-collector.git
 cd agent-collector
 npm install
 npm run build
