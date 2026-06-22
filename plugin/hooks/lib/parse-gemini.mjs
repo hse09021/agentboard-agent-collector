@@ -46,7 +46,7 @@ export function parseGeminiSession(filePath) {
 
   let inputTokens = 0;
   let outputTokens = 0;
-  let cachedTokens = 0;
+  let cacheReadTokens = 0;
   let thoughtsTokens = 0;
   let model;
   let startedAt;
@@ -103,19 +103,19 @@ export function parseGeminiSession(filePath) {
 
     inputTokens += rawInput - cached;
     outputTokens += rawOutput + thoughts;
-    cachedTokens += cached;
+    cacheReadTokens += cached;
     thoughtsTokens += thoughts;
   }
 
   if (!hasAny) return null;
 
-  const totalTokens = inputTokens + outputTokens + cachedTokens;
+  const totalTokens = inputTokens + outputTokens + cacheReadTokens;
   if (totalTokens <= 0) return null;
 
   return {
     inputTokens,
     outputTokens,
-    cachedTokens,
+    cacheReadTokens,
     totalTokens,
     model,
     startedAt: startedAt ?? new Date().toISOString(),

@@ -12,7 +12,7 @@ function validEvent() {
     total_tokens: 1000,
     input_tokens: 800,
     output_tokens: 200,
-    collector_version: "0.2.0",
+    collector_version: "0.3.0",
   };
 }
 
@@ -93,7 +93,8 @@ describe("validateUsageEvent", () => {
       ...validEvent(),
       input_tokens: 0,
       output_tokens: 1000,
-      cached_tokens: 200,
+      cache_creation_tokens: 50,
+      cache_read_tokens: 150,
     });
     expect(result.valid).toBe(true);
   });
@@ -101,6 +102,31 @@ describe("validateUsageEvent", () => {
   it("fails when optional token fields are negative", () => {
     const result = validateUsageEvent({ ...validEvent(), input_tokens: -1 });
     expect(result.valid).toBe(false);
+  });
+
+  it("fails when cache creation tokens are negative", () => {
+    const result = validateUsageEvent({
+      ...validEvent(),
+      cache_creation_tokens: -1,
+    });
+    expect(result.valid).toBe(false);
+  });
+
+  it("fails when cache read tokens are floats", () => {
+    const result = validateUsageEvent({
+      ...validEvent(),
+      cache_read_tokens: 1.5,
+    });
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects the deprecated cached_tokens field", () => {
+    const result = validateUsageEvent({
+      ...validEvent(),
+      cached_tokens: 100,
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("cache_read_tokens"))).toBe(true);
   });
 
   it("fails when optional token fields are floats", () => {

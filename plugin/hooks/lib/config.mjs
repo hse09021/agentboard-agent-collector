@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 
-export const COLLECTOR_VERSION = '0.2.0';
+export const COLLECTOR_VERSION = '0.3.0';
 export const DEFAULT_API_URL = 'https://agentboard.kro.kr/api/proxy';
 
 function getConfigDir() {

@@ -23,9 +23,10 @@ const SAFE_EVENT: UsageEvent = {
   ended_at: "2024-06-01T10:30:00Z",
   input_tokens: 5000,
   output_tokens: 2000,
-  cached_tokens: 500,
+  cache_creation_tokens: 100,
+  cache_read_tokens: 400,
   total_tokens: 7500,
-  collector_version: "0.2.0",
+  collector_version: "0.3.0",
   os: "macos",
 };
 

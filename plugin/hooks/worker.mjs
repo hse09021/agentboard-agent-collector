@@ -102,7 +102,7 @@ function buildUsageEvent(deviceId, source, sessionId, parsed) {
     input_tokens: parsed.inputTokens,
     output_tokens: parsed.outputTokens,
     cache_creation_tokens: parsed.cacheCreationTokens ?? 0,
-    cached_tokens: parsed.cachedTokens,
+    cache_read_tokens: parsed.cacheReadTokens,
     total_tokens: parsed.totalTokens,
     collector_version: COLLECTOR_VERSION,
   };

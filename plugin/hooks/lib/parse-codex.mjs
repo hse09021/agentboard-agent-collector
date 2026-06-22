@@ -88,7 +88,7 @@ export function parseCodexFile(filePath) {
 
   let inputTokens = 0;
   let outputTokens = 0;
-  let cachedTokens = 0;
+  let cacheReadTokens = 0;
   let model;
   let startedAt;
   let endedAt;
@@ -160,14 +160,14 @@ export function parseCodexFile(filePath) {
 
     inputTokens += usage.input_tokens;
     outputTokens += usage.output_tokens;
-    cachedTokens += usage.cache_read_tokens;
+    cacheReadTokens += usage.cache_read_tokens;
   }
 
-  const rawTotal = inputTokens + outputTokens + cachedTokens;
+  const rawTotal = inputTokens + outputTokens + cacheReadTokens;
   if (rawTotal === 0) return null;
 
-  const uncachedInputTokens = Math.max(0, inputTokens - cachedTokens);
-  const totalTokens = uncachedInputTokens + outputTokens + cachedTokens;
+  const uncachedInputTokens = Math.max(0, inputTokens - cacheReadTokens);
+  const totalTokens = uncachedInputTokens + outputTokens + cacheReadTokens;
 
   return {
     model: model ?? 'codex',
@@ -175,7 +175,7 @@ export function parseCodexFile(filePath) {
     endedAt: endedAt ?? new Date().toISOString(),
     inputTokens: uncachedInputTokens,
     outputTokens,
-    cachedTokens,
+    cacheReadTokens,
     totalTokens,
   };
 }

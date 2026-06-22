@@ -51,7 +51,7 @@ describe('parseClaudeSession — basic token counting', () => {
     expect(result.inputTokens).toBe(200);
     expect(result.outputTokens).toBe(80);
     expect(result.cacheCreationTokens).toBe(0);
-    expect(result.cachedTokens).toBe(0);
+    expect(result.cacheReadTokens).toBe(0);
     expect(result.totalTokens).toBe(280);
   });
 
@@ -80,12 +80,12 @@ describe('parseClaudeSession — basic token counting', () => {
 });
 
 describe('parseClaudeSession — cache token routing', () => {
-  it('cache_read_input_tokens go into cachedTokens', () => {
+  it('cache_read_input_tokens go into cacheReadTokens', () => {
     const file = writeTmpJsonl('session.jsonl', [
       makeAssistant({ inputTokens: 50, outputTokens: 30, cacheRead: 200 }),
     ]);
     const result = parseClaudeSession(file);
-    expect(result.cachedTokens).toBe(200);
+    expect(result.cacheReadTokens).toBe(200);
     expect(result.inputTokens).toBe(50);
     expect(result.totalTokens).toBe(50 + 30 + 200);
   });
@@ -97,17 +97,17 @@ describe('parseClaudeSession — cache token routing', () => {
     const result = parseClaudeSession(file);
     expect(result.inputTokens).toBe(50);
     expect(result.cacheCreationTokens).toBe(300);
-    expect(result.cachedTokens).toBe(0);
+    expect(result.cacheReadTokens).toBe(0);
     expect(result.totalTokens).toBe(50 + 300 + 30);
   });
 
-  it('totalTokens equals inputTokens + cacheCreationTokens + outputTokens + cachedTokens', () => {
+  it('totalTokens equals inputTokens + cacheCreationTokens + outputTokens + cacheReadTokens', () => {
     const file = writeTmpJsonl('session.jsonl', [
       makeAssistant({ inputTokens: 80, outputTokens: 40, cacheCreation: 200, cacheRead: 100 }),
     ]);
     const result = parseClaudeSession(file);
     expect(result.totalTokens).toBe(
-      result.inputTokens + result.cacheCreationTokens + result.outputTokens + result.cachedTokens
+      result.inputTokens + result.cacheCreationTokens + result.outputTokens + result.cacheReadTokens
     );
   });
 });

@@ -25,7 +25,7 @@ export interface UsageSummary {
   total_tokens: number;
   input_tokens: number;
   output_tokens: number;
-  cached_tokens: number;
+  cache_tokens: number;
   estimated_cost_usd: number;
   session_count: number;
   active_days: number;

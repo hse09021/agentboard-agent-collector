@@ -15,6 +15,10 @@ export function validateUsageEvent(event: unknown): ValidationResult {
 
   const e = event as Record<string, unknown>;
 
+  if ("cached_tokens" in e) {
+    errors.push("cached_tokens is not supported; use cache_read_tokens");
+  }
+
   if (e.schema_version !== "1.0") {
     errors.push(`schema_version must be "1.0", got: ${String(e.schema_version)}`);
   }
@@ -52,7 +56,12 @@ export function validateUsageEvent(event: unknown): ValidationResult {
     errors.push("total_tokens must be a positive integer");
   }
 
-  for (const field of ["input_tokens", "output_tokens", "cached_tokens"] as const) {
+  for (const field of [
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_tokens",
+    "cache_read_tokens",
+  ] as const) {
     if (e[field] !== undefined) {
       const val = e[field];
       if (typeof val !== "number" || !Number.isInteger(val) || val < 0) {

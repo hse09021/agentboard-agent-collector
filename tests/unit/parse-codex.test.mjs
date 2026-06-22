@@ -60,7 +60,7 @@ describe('parseCodexFile — basic token counting', () => {
     expect(result).not.toBeNull();
     expect(result.inputTokens).toBe(100);
     expect(result.outputTokens).toBe(50);
-    expect(result.cachedTokens).toBe(0);
+    expect(result.cacheReadTokens).toBe(0);
     expect(result.totalTokens).toBe(150);
   });
 
@@ -101,7 +101,7 @@ describe('parseCodexFile — cached_input_tokens field', () => {
       tokenCountEvent({ input_tokens: 300, output_tokens: 80, cached_input_tokens: 200 }),
     ]);
     const result = parseCodexFile(file);
-    expect(result.cachedTokens).toBe(200);
+    expect(result.cacheReadTokens).toBe(200);
   });
 
   it('also accepts cache_read_input_tokens as a fallback', () => {
@@ -110,7 +110,7 @@ describe('parseCodexFile — cached_input_tokens field', () => {
       tokenCountEvent({ input_tokens: 300, output_tokens: 80, cache_read_input_tokens: 150 }),
     ]);
     const result = parseCodexFile(file);
-    expect(result.cachedTokens).toBe(150);
+    expect(result.cacheReadTokens).toBe(150);
   });
 
   it('also accepts cached_tokens as a fallback', () => {
@@ -119,7 +119,7 @@ describe('parseCodexFile — cached_input_tokens field', () => {
       tokenCountEvent({ input_tokens: 300, output_tokens: 80, cached_tokens: 100 }),
     ]);
     const result = parseCodexFile(file);
-    expect(result.cachedTokens).toBe(100);
+    expect(result.cacheReadTokens).toBe(100);
   });
 
   it('cached_input_tokens wins over other field names', () => {
@@ -133,7 +133,7 @@ describe('parseCodexFile — cached_input_tokens field', () => {
       }),
     ]);
     const result = parseCodexFile(file);
-    expect(result.cachedTokens).toBe(200);
+    expect(result.cacheReadTokens).toBe(200);
   });
 });
 
@@ -145,7 +145,7 @@ describe('parseCodexFile — no double-counting of cached tokens', () => {
     ]);
     const result = parseCodexFile(file);
     expect(result.inputTokens).toBe(100);
-    expect(result.cachedTokens).toBe(200);
+    expect(result.cacheReadTokens).toBe(200);
     expect(result.outputTokens).toBe(80);
   });
 
@@ -158,13 +158,13 @@ describe('parseCodexFile — no double-counting of cached tokens', () => {
     expect(result.totalTokens).toBe(300 + 80);
   });
 
-  it('totalTokens = inputTokens + outputTokens + cachedTokens', () => {
+  it('totalTokens = inputTokens + outputTokens + cacheReadTokens', () => {
     const file = writeTmpJsonl('session.jsonl', [
       sessionMeta(),
       tokenCountEvent({ input_tokens: 400, output_tokens: 100, cached_input_tokens: 150 }),
     ]);
     const result = parseCodexFile(file);
-    expect(result.totalTokens).toBe(result.inputTokens + result.outputTokens + result.cachedTokens);
+    expect(result.totalTokens).toBe(result.inputTokens + result.outputTokens + result.cacheReadTokens);
   });
 
   it('handles the case where all input is cached', () => {
@@ -174,7 +174,7 @@ describe('parseCodexFile — no double-counting of cached tokens', () => {
     ]);
     const result = parseCodexFile(file);
     expect(result.inputTokens).toBe(0);
-    expect(result.cachedTokens).toBe(500);
+    expect(result.cacheReadTokens).toBe(500);
     expect(result.totalTokens).toBe(560);
   });
 
@@ -186,7 +186,7 @@ describe('parseCodexFile — no double-counting of cached tokens', () => {
     ]);
     const result = parseCodexFile(file);
     expect(result.inputTokens).toBe(250);
-    expect(result.cachedTokens).toBe(250);
+    expect(result.cacheReadTokens).toBe(250);
     expect(result.outputTokens).toBe(100);
     expect(result.totalTokens).toBe(600);
   });

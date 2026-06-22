@@ -117,15 +117,14 @@ export function parseClaudeSession(transcriptPath) {
 
   if (!hasAny) return null;
 
-  const cachedTokens = cacheReadTokens;
-  const totalTokens = inputTokens + cacheCreationTokens + outputTokens + cachedTokens;
+  const totalTokens = inputTokens + cacheCreationTokens + outputTokens + cacheReadTokens;
   if (totalTokens === 0) return null;
 
   return {
     inputTokens,
     outputTokens,
     cacheCreationTokens,
-    cachedTokens,
+    cacheReadTokens,
     totalTokens,
     model,
     startedAt: startedAt ?? new Date().toISOString(),

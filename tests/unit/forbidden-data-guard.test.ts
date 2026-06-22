@@ -27,7 +27,7 @@ describe("assertNoForbiddenFields", () => {
       total_tokens: 1000,
       input_tokens: 800,
       output_tokens: 200,
-      collector_version: "0.2.0",
+      collector_version: "0.3.0",
     };
     expect(() => assertNoForbiddenFields(event)).not.toThrow();
   });

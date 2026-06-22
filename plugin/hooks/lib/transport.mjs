@@ -44,7 +44,7 @@ export async function uploadEvents(apiBaseUrl, authToken, deviceId, events) {
   const headers = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${authToken}`,
-    'User-Agent': `agentboard-hook/0.2.0`,
+    'User-Agent': `agentboard-hook/0.3.0`,
   };
 
   let lastError = null;

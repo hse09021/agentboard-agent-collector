@@ -74,7 +74,7 @@ function buildUsageEvent(deviceId, sessionId, parsed) {
     ended_at: parsed.endedAt ?? new Date().toISOString(),
     input_tokens: parsed.inputTokens,
     output_tokens: parsed.outputTokens,
-    cached_tokens: parsed.cachedTokens,
+    cache_read_tokens: parsed.cacheReadTokens,
     total_tokens: parsed.totalTokens,
     collector_version: COLLECTOR_VERSION,
   };

@@ -1,4 +1,4 @@
-export const COLLECTOR_VERSION = "0.2.0";
+export const COLLECTOR_VERSION = "0.3.0";
 
 export type AgentSource =
   | "claude_code"
@@ -28,7 +28,7 @@ export interface UsageEvent {
   input_tokens?: number;
   output_tokens?: number;
   cache_creation_tokens?: number;
-  cached_tokens?: number;
+  cache_read_tokens?: number;
   total_tokens: number;
   estimated_cost_usd?: number;
   collector_version: string;
