@@ -22,6 +22,7 @@ import {
   isSessionSent,
   markSessionSent,
   COLLECTOR_VERSION,
+  getApiBaseUrl,
 } from './lib/config.mjs';
 import { uploadEvents } from './lib/transport.mjs';
 
@@ -112,7 +113,7 @@ async function main() {
   }
 
   const deviceId = config.device_id;
-  const apiBaseUrl = config.api_base_url ?? 'https://agentboard.kro.kr/api/proxy';
+  const apiBaseUrl = getApiBaseUrl(config);
   const event = buildUsageEvent(deviceId, sessionId, parsed);
 
   try {

@@ -11,7 +11,11 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 
 export const COLLECTOR_VERSION = '0.3.0';
-export const DEFAULT_API_URL = 'https://agentboard.kro.kr/api/proxy';
+export const DEFAULT_API_URL = process.env.AGENTBOARD_API_URL ?? 'https://agentboard.kro.kr/api/proxy';
+
+function stripTrailingSlash(url) {
+  return url.replace(/\/+$/, '');
+}
 
 function getConfigDir() {
   if (process.platform === 'win32') {
@@ -29,10 +33,18 @@ export const HOOK_SENT_PATH = join(CONFIG_DIR, 'hook-sent.json');
 export function loadConfig() {
   if (!existsSync(CONFIG_PATH)) return null;
   try {
-    return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
+    const config = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
+    if (config?.api_base_url) {
+      config.api_base_url = stripTrailingSlash(config.api_base_url);
+    }
+    return config;
   } catch {
     return null;
   }
+}
+
+export function getApiBaseUrl(config) {
+  return stripTrailingSlash(config?.api_base_url ?? DEFAULT_API_URL);
 }
 
 export function loadToken() {

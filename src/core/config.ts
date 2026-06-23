@@ -6,13 +6,51 @@ import { generateDeviceId } from "./device-id";
 export interface CollectorConfig {
   device_id?: string;
   api_base_url: string;
+  app_base_url: string;
 }
 
 const DEFAULT_API_URL = "https://agentboard.kro.kr/api/proxy";
+const DEFAULT_APP_URL = "https://agentboard.kro.kr";
+
+function stripTrailingSlash(url: string): string {
+  return url.replace(/\/+$/, "");
+}
+
+function getDefaultApiBaseUrl(): string {
+  return stripTrailingSlash(process.env.AGENTBOARD_API_URL ?? DEFAULT_API_URL);
+}
+
+function getDefaultAppBaseUrl(apiBaseUrl = getDefaultApiBaseUrl()): string {
+  if (process.env.AGENTBOARD_APP_URL) {
+    return stripTrailingSlash(process.env.AGENTBOARD_APP_URL);
+  }
+
+  try {
+    return stripTrailingSlash(new URL(apiBaseUrl).origin);
+  } catch {
+    return DEFAULT_APP_URL;
+  }
+}
 
 const DEFAULT_CONFIG: CollectorConfig = {
-  api_base_url: process.env.AGENTBOARD_API_URL ?? DEFAULT_API_URL,
+  api_base_url: getDefaultApiBaseUrl(),
+  app_base_url: getDefaultAppBaseUrl(),
 };
+
+function normalizeConfig(config: Partial<CollectorConfig>): CollectorConfig {
+  const apiBaseUrl = stripTrailingSlash(
+    config.api_base_url ?? getDefaultApiBaseUrl()
+  );
+  const appBaseUrl = stripTrailingSlash(
+    config.app_base_url ?? getDefaultAppBaseUrl(apiBaseUrl)
+  );
+
+  return {
+    ...config,
+    api_base_url: apiBaseUrl,
+    app_base_url: appBaseUrl,
+  };
+}
 
 export function getConfigDir(): string {
   if (process.platform === "win32") {
@@ -54,7 +92,7 @@ export function loadConfig(): CollectorConfig {
   try {
     const raw = fs.readFileSync(configPath, "utf-8");
     const parsed = JSON.parse(raw) as Partial<CollectorConfig>;
-    return { ...DEFAULT_CONFIG, ...parsed };
+    return normalizeConfig(parsed);
   } catch {
     return { ...DEFAULT_CONFIG };
   }

@@ -1,5 +1,5 @@
 {
-  "name": "agentboard",
+  "name": "@agentboard/collector",
   "version": "0.3.0",
   "description": "Agent usage collector CLI — track AI coding tool usage privately",
   "main": "dist/cli/index.js",

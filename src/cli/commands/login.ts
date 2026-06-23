@@ -30,6 +30,8 @@ export async function loginCommand(): Promise<void> {
 
   const config = loadConfig();
   const deviceId = getOrCreateDeviceId();
+  const loginUrl = new URL("/cli/login", config.app_base_url);
+  loginUrl.searchParams.set("device_id", deviceId);
 
   logger.plain("");
   logger.plain(chalk.bold("AgentBoard Login"));
@@ -37,9 +39,7 @@ export async function loginCommand(): Promise<void> {
   logger.plain("");
   logger.plain("1. Open the following URL in your browser:");
   logger.plain("");
-  logger.plain(
-    chalk.cyan(`  ${config.api_base_url}/login?device_id=${deviceId}`)
-  );
+  logger.plain(chalk.cyan(`  ${loginUrl.toString()}`));
   logger.plain("");
   logger.plain("2. Log in and copy the auth token shown on the page.");
   logger.plain("");

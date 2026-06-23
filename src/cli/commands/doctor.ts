@@ -112,7 +112,7 @@ async function runChecks(): Promise<CheckResult[]> {
             const parsed = JSON.parse(content);
             const sessionEndGroups: Array<Record<string, unknown>> =
               parsed?.hooks?.SessionEnd ?? [];
-            const hasAgentboardGroup = sessionEndGroups.some((g) => {
+            const hasAgentBoardGroup = sessionEndGroups.some((g) => {
               const hks = Array.isArray(g.hooks)
                 ? (g.hooks as Array<Record<string, unknown>>)
                 : [];
@@ -128,16 +128,16 @@ async function runChecks(): Promise<CheckResult[]> {
               const hks = Array.isArray(g.hooks)
                 ? (g.hooks as Array<Record<string, unknown>>)
                 : [];
-              const isAgentboard = hks.some(
+              const isAgentBoard = hks.some(
                 (h) =>
                   (typeof h.command === "string" &&
                     (h.command.includes("agentboard") ||
                       h.command.includes("session-end.mjs"))) ||
                   (typeof h.name === "string" && h.name.includes("agentboard"))
               );
-              return isAgentboard && typeof g.matcher === "string";
+              return isAgentBoard && typeof g.matcher === "string";
             });
-            if (hasAgentboardGroup && !matcherOk) {
+            if (hasAgentBoardGroup && !matcherOk) {
               registered = false;
               message =
                 "Missing matcher field — run `agentboard install-hooks` to fix";
