@@ -55,6 +55,7 @@ cd agentboard-agent-collector
 git pull
 npm install
 npm run build
+npm uninstall -g @agentboard/collector
 npm link
 agentboard --version
 agentboard install-hooks --force
@@ -63,6 +64,23 @@ agentboard doctor
 
 업데이트해도 로그인 토큰과 기기 ID는 보통 유지됩니다. 로컬 설정은 패키지 내부가 아니라 `~/.agentboard`에 저장됩니다.
 다만 훅 스크립트 경로나 내용이 바뀔 수 있으므로 업데이트 후에는 `agentboard install-hooks --force`를 실행하는 것을 권장합니다.
+
+Windows에서 `npm link` 실행 중 `EEXIST: file already exists ... agentboard.cmd` 오류가 발생하면 기존 전역 링크가 남아 있는 상태입니다.
+아래처럼 기존 전역 설치/링크를 제거한 뒤 다시 link 하세요.
+
+```bash
+npm uninstall -g @agentboard/collector
+npm link
+```
+
+그래도 같은 오류가 계속되면 PowerShell에서 오래된 shim 파일을 직접 제거한 뒤 다시 link 합니다.
+
+```powershell
+Remove-Item "$env:APPDATA\npm\agentboard.cmd" -ErrorAction SilentlyContinue
+Remove-Item "$env:APPDATA\npm\agentboard.ps1" -ErrorAction SilentlyContinue
+Remove-Item "$env:APPDATA\npm\agentboard" -ErrorAction SilentlyContinue
+npm link
+```
 
 ## 사용법
 
