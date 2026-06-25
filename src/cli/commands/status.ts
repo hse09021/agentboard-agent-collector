@@ -4,7 +4,7 @@ import * as os from "os";
 import { loadConfig, getConfigDir, getHookSentPath } from "../../core/config";
 import { hasToken, loadToken } from "../../platform/credential-store";
 import { COLLECTOR_VERSION } from "../../core/usage-event";
-import { createApiClient } from "../../api/client";
+import { ApiError, createApiClient } from "../../api/client";
 import { UsageSummary, UsageBySource } from "../../api/types";
 import { logger } from "../../core/logger";
 import chalk from "chalk";
@@ -213,8 +213,14 @@ export async function statusCommand(): Promise<void> {
 
     renderUsageTable(weekSummary, weekBySource, "This week");
     renderUsageTable(monthSummary, monthBySource, "This month");
-  } catch {
-    logger.warn("Could not fetch usage data. Check your connection or run `agentboard doctor`.");
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      logger.warn("Could not fetch usage data: login expired. Run `agentboard login` again.");
+    } else if (err instanceof ApiError) {
+      logger.warn(`Could not fetch usage data: API returned HTTP ${err.status}. Run \`agentboard doctor\`.`);
+    } else {
+      logger.warn("Could not fetch usage data. Check your connection or run `agentboard doctor`.");
+    }
     logger.plain("");
   }
 }

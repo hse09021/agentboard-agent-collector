@@ -7,7 +7,7 @@
  * Session files live at: ~/.codex/sessions/YYYY/MM/DD/{sessionId}.jsonl
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -55,6 +55,44 @@ function findCodexSessionFile(sessionId) {
   return searchDir(sessionsDir, sessionId);
 }
 
+function collectSessionFiles(dir, out = []) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+
+  for (const entry of entries) {
+    const fullPath = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      collectSessionFiles(fullPath, out);
+    } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+      out.push(fullPath);
+    }
+  }
+  return out;
+}
+
+function findLatestCodexSessionFile() {
+  const sessionsDir = getCodexSessionsDir();
+  if (!existsSync(sessionsDir)) return null;
+
+  let latest = null;
+  for (const filePath of collectSessionFiles(sessionsDir)) {
+    let mtimeMs = 0;
+    try {
+      mtimeMs = statSync(filePath).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (!latest || mtimeMs > latest.mtimeMs) {
+      latest = { filePath, mtimeMs };
+    }
+  }
+  return latest?.filePath ?? null;
+}
+
 function parseUsageObject(usageObj) {
   if (!usageObj || typeof usageObj !== 'object') return null;
   return {
@@ -90,6 +128,7 @@ export function parseCodexFile(filePath) {
   let outputTokens = 0;
   let cacheReadTokens = 0;
   let model;
+  let sessionId;
   let startedAt;
   let endedAt;
   let previousTotalUsage = null;
@@ -114,6 +153,9 @@ export function parseCodexFile(filePath) {
       entry.payload && typeof entry.payload === 'object' ? entry.payload : {};
 
     if (type === 'session_meta' || type === 'turn_context') {
+      if (type === 'session_meta' && payload.id && !sessionId) {
+        sessionId = String(payload.id);
+      }
       if (payload.model && !model) model = String(payload.model);
       continue;
     }
@@ -170,6 +212,7 @@ export function parseCodexFile(filePath) {
   const totalTokens = uncachedInputTokens + outputTokens + cacheReadTokens;
 
   return {
+    sessionId,
     model: model ?? 'codex',
     startedAt: startedAt ?? new Date().toISOString(),
     endedAt: endedAt ?? new Date().toISOString(),
@@ -186,6 +229,17 @@ export function parseCodexFile(filePath) {
  */
 export function parseCodexSession(sessionId) {
   const filePath = findCodexSessionFile(sessionId);
+  if (!filePath) return null;
+  return parseCodexFile(filePath);
+}
+
+/**
+ * Parse the most recently modified Codex session JSONL file.
+ * Used as a fallback for Codex notify payloads whose ID does not map to
+ * the persisted session filename in newer CLI versions.
+ */
+export function parseLatestCodexSession() {
+  const filePath = findLatestCodexSessionFile();
   if (!filePath) return null;
   return parseCodexFile(filePath);
 }

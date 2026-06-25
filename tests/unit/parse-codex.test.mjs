@@ -243,6 +243,18 @@ describe('parseCodexFile — deduplication of consecutive identical events', () 
 });
 
 describe('parseCodexFile — model extraction', () => {
+  it('extracts session id from session_meta', () => {
+    const file = writeTmpJsonl('session.jsonl', [
+      {
+        type: 'session_meta',
+        timestamp: '2024-06-01T10:00:00.000Z',
+        payload: { id: '019eff03-e4ce-70c2-9104-2d8b7aef208c', model: 'gpt-5.5' },
+      },
+      tokenCountEvent({ input_tokens: 100, output_tokens: 50 }),
+    ]);
+    expect(parseCodexFile(file).sessionId).toBe('019eff03-e4ce-70c2-9104-2d8b7aef208c');
+  });
+
   it('extracts model from session_meta', () => {
     const file = writeTmpJsonl('session.jsonl', [
       sessionMeta('gpt-4o-mini'),

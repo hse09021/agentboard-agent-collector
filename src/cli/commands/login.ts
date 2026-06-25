@@ -20,10 +20,10 @@ function prompt(question: string): Promise<string> {
   });
 }
 
-export async function loginCommand(): Promise<void> {
-  if (hasToken()) {
+export async function loginCommand(options: { force?: boolean } = {}): Promise<void> {
+  if (hasToken() && !options.force) {
     logger.warn(
-      "Already logged in. Run `agentboard logout` first to re-authenticate."
+      "Already logged in. Run `agentboard login --force` to re-authenticate."
     );
     return;
   }

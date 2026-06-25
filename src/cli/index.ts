@@ -13,9 +13,10 @@ program
 program
   .command("login")
   .description("Authenticate and register this device")
-  .action(async () => {
+  .option("--force", "Replace an existing saved auth token")
+  .action(async (options) => {
     const { loginCommand } = await import("./commands/login");
-    await loginCommand();
+    await loginCommand(options);
   });
 
 program

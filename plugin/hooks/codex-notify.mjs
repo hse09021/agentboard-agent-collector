@@ -14,7 +14,7 @@
  * short delay before giving up.
  */
 
-import { parseCodexSession } from './lib/parse-codex.mjs';
+import { parseCodexSession, parseLatestCodexSession } from './lib/parse-codex.mjs';
 import {
   loadConfig,
   loadToken,
@@ -82,7 +82,7 @@ function buildUsageEvent(deviceId, sessionId, parsed) {
 }
 
 async function main() {
-  const sessionId = parseSessionId();
+  let sessionId = parseSessionId();
 
   if (!sessionId) {
     process.stderr.write('agentboard-codex: no session ID in notify payload\n');
@@ -96,19 +96,24 @@ async function main() {
     process.exit(0);
   }
 
-  if (isSessionSent('codex', sessionId)) {
-    process.exit(0);
-  }
-
   let parsed = null;
   for (let attempt = 0; attempt < RETRY_MAX; attempt++) {
     parsed = parseCodexSession(sessionId);
+    if (!parsed) {
+      parsed = parseLatestCodexSession();
+      if (parsed?.sessionId) sessionId = parsed.sessionId;
+    }
     if (parsed && parsed.totalTokens > 0) break;
     if (attempt < RETRY_MAX - 1) await sleep(RETRY_DELAY_MS);
   }
 
   if (!parsed || parsed.totalTokens === 0) {
-    markSessionSent('codex', sessionId);
+    process.exit(0);
+  }
+
+  if (parsed.sessionId) sessionId = parsed.sessionId;
+
+  if (isSessionSent('codex', sessionId)) {
     process.exit(0);
   }
 

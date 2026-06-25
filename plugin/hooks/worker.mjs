@@ -183,7 +183,6 @@ async function main() {
 
   if (!parsed || parsed.totalTokens === 0) {
     workerLog(`SKIP: no tokens (parsed=${parsed ? 'non-null' : 'null'})`);
-    markSessionSent(source, sessionId);
     process.exit(0);
   }
 
