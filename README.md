@@ -28,6 +28,42 @@ npm run build
 npm link
 ```
 
+## 업데이트
+
+이미 설치된 collector를 최신 버전으로 올릴 때는 설치 방식에 따라 아래 명령을 사용합니다.
+
+### npm 글로벌 설치를 사용한 경우
+
+```bash
+npm install -g @agentboard/collector@latest
+agentboard --version
+agentboard install-hooks --force
+agentboard doctor
+```
+
+현재 설치 버전과 npm에 배포된 최신 버전을 비교하려면:
+
+```bash
+agentboard --version
+npm view @agentboard/collector version
+```
+
+### 저장소를 직접 클론하여 설치한 경우
+
+```bash
+cd agentboard-agent-collector
+git pull
+npm install
+npm run build
+npm link
+agentboard --version
+agentboard install-hooks --force
+agentboard doctor
+```
+
+업데이트해도 로그인 토큰과 기기 ID는 보통 유지됩니다. 로컬 설정은 패키지 내부가 아니라 `~/.agentboard`에 저장됩니다.
+다만 훅 스크립트 경로나 내용이 바뀔 수 있으므로 업데이트 후에는 `agentboard install-hooks --force`를 실행하는 것을 권장합니다.
+
 ## 사용법
 
 ### 1. 로그인
