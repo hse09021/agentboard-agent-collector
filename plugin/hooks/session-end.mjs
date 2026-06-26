@@ -17,7 +17,7 @@
 
 import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -33,7 +33,7 @@ const DEBUG_LOG = join(
 
 function debugLog(msg) {
   try {
-    mkdirSync(join(process.env.APPDATA ?? tmpdir(), 'agentboard'), { recursive: true });
+    mkdirSync(dirname(DEBUG_LOG), { recursive: true });
     appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] ${msg}\n`);
   } catch {}
 }
