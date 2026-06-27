@@ -51,6 +51,7 @@ function fmtSource(source: string): string {
     claude_code: "Claude Code",
     gemini: "Gemini CLI ",
     gemini_cli: "Gemini CLI ",
+    antigravity_cli: "Antigravity",
     codex: "Codex CLI  ",
     opencode: "OpenCode   ",
     github_copilot: "GH Copilot ",
@@ -135,12 +136,25 @@ export async function statusCommand(): Promise<void> {
   logger.plain("─".repeat(40));
 
   const home = os.homedir();
+  const antigravityUsesGeminiDir = fs.existsSync(
+    path.join(home, ".gemini", "antigravity-cli")
+  );
   const hooks: Array<{ name: string; registered: boolean }> = [
     {
       name: "Claude Code",
       registered: isHookRegistered(
         path.join(home, ".claude", "settings.json"),
         (c) => c.includes("agentboard")
+      ),
+    },
+    {
+      name: "Antigravity",
+      registered: isHookRegistered(
+        path.join(home, ".antigravity", "settings.json"),
+        (c) => c.includes("agentboard")
+      ) || isHookRegistered(
+        path.join(home, ".gemini", "settings.json"),
+        (c) => c.includes("agentboard") && antigravityUsesGeminiDir
       ),
     },
     {
@@ -164,7 +178,9 @@ export async function statusCommand(): Promise<void> {
         (c) => c.includes("agentboard")
       ),
     },
-  ];
+  ].filter(
+    (hook) => hook.name.trim() !== "Gemini CLI" || !antigravityUsesGeminiDir
+  );
 
   for (const { name, registered } of hooks) {
     const icon = registered ? chalk.green("✔") : chalk.dim("○");

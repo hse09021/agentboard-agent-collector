@@ -46,7 +46,7 @@ program
 program
   .command("install-hooks")
   .description(
-    "Register real-time session hooks with Claude Code, Codex CLI, and Gemini CLI"
+    "Register real-time session hooks with Claude Code, Codex CLI, and Antigravity CLI"
   )
   .option("--force", "Re-register even if hooks already exist")
   .action(async (options) => {

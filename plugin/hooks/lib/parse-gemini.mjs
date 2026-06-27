@@ -1,11 +1,14 @@
 /**
- * Gemini CLI session JSON parser for hook scripts.
+ * Gemini/Antigravity session JSON parser for hook scripts.
  *
  * Privacy: reads only type, metadata.tokenCount.* fields.
  * Never accesses conversation content.
  *
- * Session files live at:
+ * Legacy Gemini session files live at:
  *   ~/.gemini/tmp/{checksum}/chats/session-{sessionId}.json
+ *
+ * Antigravity session files use the same JSON token metadata shape under:
+ *   ~/.antigravity/tmp/{checksum}/chats/session-{sessionId}.json
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -25,7 +28,7 @@ function toIso(v) {
 }
 
 /**
- * Parse a Gemini CLI session JSON file.
+ * Parse a Gemini-compatible CLI session JSON file.
  * @param {string} filePath - Absolute path to the session .json file
  */
 export function parseGeminiSession(filePath) {

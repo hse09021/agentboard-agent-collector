@@ -43,6 +43,7 @@ import { uploadEvents } from './lib/transport.mjs';
 import { parseClaudeSession } from './lib/parse-claude.mjs';
 import { parseOpenCodeSession } from './lib/parse-opencode.mjs';
 import { parseGeminiSession } from './lib/parse-gemini.mjs';
+import { parseAntigravitySession } from './lib/parse-antigravity.mjs';
 import { parseCodexSession } from './lib/parse-codex.mjs';
 
 // ─── Source detection ─────────────────────────────────────────────────────────
@@ -67,7 +68,18 @@ function detectSource(payload) {
     return { source: 'opencode', sessionId: opencodeMatch[1], transcriptPath };
   }
 
-  // Gemini CLI: session-*.json in ~/.gemini/tmp/.../chats/
+  // Antigravity CLI: session-*.json in ~/.antigravity/tmp/.../chats/
+  if (
+    transcriptPath.endsWith('.json') &&
+    (transcriptPath.includes('.antigravity') ||
+      transcriptPath.includes('antigravity-cli') ||
+      payload.source === 'antigravity_cli' ||
+      payload.source === 'antigravity')
+  ) {
+    return { source: 'antigravity_cli', sessionId, transcriptPath };
+  }
+
+  // Gemini CLI legacy: session-*.json in ~/.gemini/tmp/.../chats/
   if (
     transcriptPath.endsWith('.json') &&
     (transcriptPath.includes('.gemini') || transcriptPath.includes('chats'))
@@ -170,6 +182,8 @@ async function main() {
       parsed = parseOpenCodeSession(sessionId);
     } else if (source === 'gemini_cli') {
       parsed = parseGeminiSession(transcriptPath);
+    } else if (source === 'antigravity_cli') {
+      parsed = parseAntigravitySession(transcriptPath);
     } else if (source === 'codex') {
       parsed = parseCodexSession(sessionId);
     }

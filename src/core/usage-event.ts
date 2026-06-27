@@ -5,7 +5,8 @@ export type AgentSource =
   | "codex"
   | "opencode"
   | "github_copilot"
-  | "gemini_cli";
+  | "gemini_cli"
+  | "antigravity_cli";
 
 export const SUPPORTED_SOURCES: AgentSource[] = [
   "claude_code",
@@ -13,6 +14,7 @@ export const SUPPORTED_SOURCES: AgentSource[] = [
   "opencode",
   "github_copilot",
   "gemini_cli",
+  "antigravity_cli",
 ];
 
 export interface UsageEvent {

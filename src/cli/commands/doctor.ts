@@ -84,10 +84,20 @@ async function runChecks(): Promise<CheckResult[]> {
 
   // 6. Hook registration checks
   const home = os.homedir();
+  const antigravityUsesGeminiDir = fs.existsSync(
+    path.join(home, ".gemini", "antigravity-cli")
+  );
+  const antigravitySettingsPath = antigravityUsesGeminiDir
+    ? path.join(home, ".gemini", "settings.json")
+    : path.join(home, ".antigravity", "settings.json");
   const hookChecks: Array<{ label: string; file: string }> = [
     {
       label: "Hook: claude_code",
       file: path.join(home, ".claude", "settings.json"),
+    },
+    {
+      label: "Hook: antigravity_cli",
+      file: antigravitySettingsPath,
     },
     {
       label: "Hook: gemini_cli",
@@ -97,7 +107,9 @@ async function runChecks(): Promise<CheckResult[]> {
       label: "Hook: codex",
       file: path.join(home, ".codex", "config.toml"),
     },
-  ];
+  ].filter(
+    (check) => check.label !== "Hook: gemini_cli" || !antigravityUsesGeminiDir
+  );
 
   for (const { label, file } of hookChecks) {
     let registered = false;

@@ -26,6 +26,15 @@ function getGeminiSettingsPath(): string {
   return path.join(HOME, ".gemini", "settings.json");
 }
 
+function getAntigravitySettingsPath(): string {
+  const nativePath = path.join(HOME, ".antigravity", "settings.json");
+  const migratedDir = path.join(HOME, ".gemini", "antigravity-cli");
+  if (!fs.existsSync(nativePath) && fs.existsSync(migratedDir)) {
+    return getGeminiSettingsPath();
+  }
+  return path.join(HOME, ".antigravity", "settings.json");
+}
+
 function getCodexConfigPath(): string {
   return path.join(HOME, ".codex", "config.toml");
 }
@@ -48,6 +57,17 @@ function isClaudeInstalled(): boolean {
 
 function isGeminiInstalled(): boolean {
   return isBinaryInPath("gemini");
+}
+
+function isAntigravityInstalled(): boolean {
+  const settingsPath = getAntigravitySettingsPath();
+  const settingsDir = path.dirname(settingsPath);
+  return (
+    isBinaryInPath("antigravity") ||
+    fs.existsSync(settingsPath) ||
+    fs.existsSync(settingsDir) ||
+    fs.existsSync(path.join(HOME, ".gemini", "antigravity-cli"))
+  );
 }
 
 function isCodexInstalled(): boolean {
@@ -201,6 +221,20 @@ function unregisterGeminiHook() {
   return unregisterJsonSessionEndHook(getGeminiSettingsPath());
 }
 
+function registerAntigravityHook(nodeExe: string, scriptPath: string): HookResult {
+  return registerJsonSessionEndHook(getAntigravitySettingsPath(), {
+    type: "command",
+    name: "agentboard-session-end",
+    command: nodeExe,
+    args: [scriptPath],
+    timeout: 10,
+  });
+}
+
+function unregisterAntigravityHook() {
+  return unregisterJsonSessionEndHook(getAntigravitySettingsPath());
+}
+
 // ─── Codex CLI hook registration ─────────────────────────────────────────────
 
 const CODEX_NOTIFY_COMMENT = "# agentboard-notify";
@@ -330,10 +364,25 @@ export async function installHooksCommand(options: {
     }
   }
 
-  // ── Gemini CLI ───────────────────────────────────────────────────────────
-  if (!isGeminiInstalled()) {
-    console.log(`   Gemini CLI    not installed — skipping`);
+  // ── Antigravity CLI ──────────────────────────────────────────────────────
+  if (!isAntigravityInstalled()) {
+    console.log(`   Antigravity   not installed — skipping`);
   } else {
+    const result = options.force
+      ? (unregisterAntigravityHook(), registerAntigravityHook(nodePath, sessionEndScript))
+      : registerAntigravityHook(nodePath, sessionEndScript);
+    const antigravityPath = getAntigravitySettingsPath();
+    if (result === "added") {
+      console.log(`✔  Antigravity   → ${antigravityPath}`);
+    } else if (result === "already-registered") {
+      console.log(`   Antigravity   already registered — skipping`);
+    } else {
+      console.warn(`⚠  Antigravity   → could not write ${antigravityPath}`);
+    }
+  }
+
+  // ── Gemini CLI legacy ────────────────────────────────────────────────────
+  if (isGeminiInstalled()) {
     const result = options.force
       ? (unregisterGeminiHook(), registerGeminiHook(nodePath, sessionEndScript))
       : registerGeminiHook(nodePath, sessionEndScript);
@@ -388,6 +437,13 @@ export async function uninstallHooksCommand(): Promise<void> {
   );
 
   const geminiResult = unregisterGeminiHook();
+  const antigravityResult = unregisterAntigravityHook();
+  console.log(
+    antigravityResult === "removed"
+      ? `✔  Antigravity   hook removed`
+      : `   Antigravity   hook not found — skipping`
+  );
+
   console.log(
     geminiResult === "removed"
       ? `✔  Gemini CLI    hook removed`

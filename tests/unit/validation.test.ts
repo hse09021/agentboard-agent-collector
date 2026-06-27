@@ -56,7 +56,14 @@ describe("validateUsageEvent", () => {
   });
 
   it("accepts all valid sources", () => {
-    const sources = ["claude_code", "codex", "opencode", "github_copilot", "gemini_cli"];
+    const sources = [
+      "claude_code",
+      "codex",
+      "opencode",
+      "github_copilot",
+      "gemini_cli",
+      "antigravity_cli",
+    ];
     for (const source of sources) {
       const result = validateUsageEvent({ ...validEvent(), source });
       expect(result.valid).toBe(true);
