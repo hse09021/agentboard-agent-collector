@@ -19,8 +19,9 @@ import {
   loadConfig,
   loadToken,
   generateEventId,
-  isSessionSent,
-  markSessionSent,
+  getSentTotals,
+  markTotalsSent,
+  computeDelta,
   COLLECTOR_VERSION,
   getApiBaseUrl,
 } from './lib/config.mjs';
@@ -63,7 +64,7 @@ function parseSessionId() {
   return null;
 }
 
-function buildUsageEvent(deviceId, sessionId, parsed) {
+function buildUsageEvent(deviceId, sessionId, parsed, delta) {
   return {
     schema_version: '1.0',
     event_id: generateEventId(),
@@ -73,10 +74,10 @@ function buildUsageEvent(deviceId, sessionId, parsed) {
     session_id: sessionId,
     started_at: parsed.startedAt,
     ended_at: parsed.endedAt ?? new Date().toISOString(),
-    input_tokens: parsed.inputTokens,
-    output_tokens: parsed.outputTokens,
-    cache_read_tokens: parsed.cacheReadTokens,
-    total_tokens: parsed.totalTokens,
+    input_tokens: delta.inputTokens,
+    output_tokens: delta.outputTokens,
+    cache_read_tokens: delta.cacheReadTokens,
+    total_tokens: delta.totalTokens,
     collector_version: COLLECTOR_VERSION,
   };
 }
@@ -113,17 +114,23 @@ async function main() {
 
   if (parsed.sessionId) sessionId = parsed.sessionId;
 
-  if (isSessionSent('codex', sessionId)) {
+  // Codex notify fires per-turn, so `parsed` holds the session's cumulative
+  // totals. Upload only the delta since the last turn we reported; otherwise the
+  // same session's later tokens would be dropped by session-level dedup.
+  const alreadySent = getSentTotals('codex', sessionId);
+  const delta = computeDelta(parsed, alreadySent);
+
+  if (delta.totalTokens === 0) {
     process.exit(0);
   }
 
   const deviceId = config.device_id;
   const apiBaseUrl = getApiBaseUrl(config);
-  const event = buildUsageEvent(deviceId, sessionId, parsed);
+  const event = buildUsageEvent(deviceId, sessionId, parsed, delta);
 
   try {
     await uploadEvents(apiBaseUrl, token, deviceId, [event]);
-    markSessionSent('codex', sessionId);
+    markTotalsSent('codex', sessionId, parsed);
   } catch (err) {
     process.stderr.write(`agentboard-codex: upload failed: ${err.message}\n`);
     process.exit(1);

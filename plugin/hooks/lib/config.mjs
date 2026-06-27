@@ -91,6 +91,74 @@ export function markSessionSent(source, sessionId) {
   saveHookSent(sent);
 }
 
+// ─── Incremental (delta) tracking ─────────────────────────────────────────────
+//
+// Codex fires its notify hook per-turn, so a session's token total grows across
+// many invocations. Plain session-level dedup (isSessionSent) would upload only
+// the first turn and drop everything after it. For such sources we instead store
+// the cumulative totals already uploaded and upload only the delta each turn.
+// Other tools (claude/gemini/opencode) keep using isSessionSent/markSessionSent.
+
+const ZERO_TOTALS = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  totalTokens: 0,
+};
+
+function normalizeTotals(totals) {
+  if (!totals || typeof totals !== 'object') return { ...ZERO_TOTALS };
+  const nn = (v) => {
+    const n = typeof v === 'number' ? v : Number(v);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  };
+  return {
+    inputTokens: nn(totals.inputTokens),
+    outputTokens: nn(totals.outputTokens),
+    cacheReadTokens: nn(totals.cacheReadTokens),
+    totalTokens: nn(totals.totalTokens),
+  };
+}
+
+/**
+ * Return the cumulative token totals already uploaded for a session, or a
+ * zero-filled object when nothing has been sent yet.
+ */
+export function getSentTotals(source, sessionId) {
+  const sent = loadHookSent();
+  const record = sent[hookSentKey(source, sessionId)];
+  return normalizeTotals(record?.totals);
+}
+
+/**
+ * Persist the cumulative token totals uploaded so far for a session.
+ */
+export function markTotalsSent(source, sessionId, totals) {
+  const sent = loadHookSent();
+  sent[hookSentKey(source, sessionId)] = {
+    sentAt: new Date().toISOString(),
+    totals: normalizeTotals(totals),
+  };
+  saveHookSent(sent);
+}
+
+/**
+ * Given the cumulative totals parsed from a session and the totals already
+ * uploaded, return the per-field delta (never negative). Used to upload only
+ * the tokens accrued since the previous turn.
+ */
+export function computeDelta(cumulative, alreadySent) {
+  const cur = normalizeTotals(cumulative);
+  const prev = normalizeTotals(alreadySent);
+  const sub = (a, b) => Math.max(0, a - b);
+  return {
+    inputTokens: sub(cur.inputTokens, prev.inputTokens),
+    outputTokens: sub(cur.outputTokens, prev.outputTokens),
+    cacheReadTokens: sub(cur.cacheReadTokens, prev.cacheReadTokens),
+    totalTokens: sub(cur.totalTokens, prev.totalTokens),
+  };
+}
+
 // ─── ID generation ────────────────────────────────────────────────────────────
 
 export function generateEventId() {
