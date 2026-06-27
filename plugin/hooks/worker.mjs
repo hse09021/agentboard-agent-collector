@@ -14,7 +14,7 @@
  */
 
 import { unlinkSync, readFileSync, mkdirSync, appendFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const DEBUG_LOG = join(
@@ -25,7 +25,7 @@ const DEBUG_LOG = join(
 
 function workerLog(msg) {
   try {
-    mkdirSync(join(process.env.APPDATA ?? tmpdir(), 'agentboard'), { recursive: true });
+    mkdirSync(dirname(DEBUG_LOG), { recursive: true });
     appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] [worker] ${msg}\n`);
   } catch { /* best-effort */ }
 }
