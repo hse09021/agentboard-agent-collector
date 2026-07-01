@@ -26,6 +26,7 @@ import {
   getApiBaseUrl,
 } from './lib/config.mjs';
 import { uploadEvents } from './lib/transport.mjs';
+import { captureUsageLimitSnapshot } from './lib/usage-limit.mjs';
 
 const RETRY_MAX = 6;
 const RETRY_DELAY_MS = 1500;
@@ -82,6 +83,24 @@ function buildUsageEvent(deviceId, sessionId, parsed, delta) {
   };
 }
 
+// A usage-limit-only event: no new token delta this turn, but a `/status`
+// snapshot is still worth uploading. Valid per the (relaxed) server schema,
+// which allows `total_tokens: 0`.
+function buildUsageOnlyEvent(deviceId, sessionId) {
+  const now = new Date().toISOString();
+  return {
+    schema_version: '1.0',
+    event_id: generateEventId(),
+    device_id: deviceId,
+    source: 'codex',
+    session_id: sessionId,
+    started_at: now,
+    ended_at: now,
+    total_tokens: 0,
+    collector_version: COLLECTOR_VERSION,
+  };
+}
+
 async function main() {
   let sessionId = parseSessionId();
 
@@ -97,6 +116,16 @@ async function main() {
     process.exit(0);
   }
 
+  // Run best-effort, throttled `/status` capture concurrently with the
+  // token-parse retry loop below — never lets a slow/failed CLI call delay
+  // or break token collection. NOTE: this currently always resolves to
+  // null for 'codex' — confirmed (codex-cli 0.142.4, see /codex.md) that
+  // `codex exec "/status"` burns a real turn instead of querying status,
+  // so codex capture is hard-disabled in lib/usage-limit.mjs until a safe
+  // headless mechanism exists. Left wired up here so re-enabling it later
+  // is a one-line change in usage-limit.mjs, not a new integration.
+  const usageSnapshotPromise = captureUsageLimitSnapshot('codex').catch(() => null);
+
   let parsed = null;
   for (let attempt = 0; attempt < RETRY_MAX; attempt++) {
     parsed = parseCodexSession(sessionId);
@@ -108,29 +137,40 @@ async function main() {
     if (attempt < RETRY_MAX - 1) await sleep(RETRY_DELAY_MS);
   }
 
-  if (!parsed || parsed.totalTokens === 0) {
-    process.exit(0);
+  const usageSnapshot = await usageSnapshotPromise;
+
+  // Codex notify fires per-turn, so `parsed` (when present) holds the
+  // session's cumulative totals. Upload only the delta since the last turn
+  // we reported; otherwise the same session's later tokens would be dropped
+  // by session-level dedup. If nothing parsed at all, there's no delta to
+  // compute — fall through to the usage-snapshot-only path below.
+  let delta = null;
+  let hasTokens = false;
+  if (parsed && parsed.totalTokens > 0) {
+    if (parsed.sessionId) sessionId = parsed.sessionId;
+    const alreadySent = getSentTotals('codex', sessionId);
+    delta = computeDelta(parsed, alreadySent);
+    hasTokens = delta.totalTokens > 0;
   }
 
-  if (parsed.sessionId) sessionId = parsed.sessionId;
-
-  // Codex notify fires per-turn, so `parsed` holds the session's cumulative
-  // totals. Upload only the delta since the last turn we reported; otherwise the
-  // same session's later tokens would be dropped by session-level dedup.
-  const alreadySent = getSentTotals('codex', sessionId);
-  const delta = computeDelta(parsed, alreadySent);
-
-  if (delta.totalTokens === 0) {
+  if (!hasTokens && !usageSnapshot) {
     process.exit(0);
   }
 
   const deviceId = config.device_id;
   const apiBaseUrl = getApiBaseUrl(config);
-  const event = buildUsageEvent(deviceId, sessionId, parsed, delta);
+  const event = hasTokens
+    ? buildUsageEvent(deviceId, sessionId, parsed, delta)
+    : buildUsageOnlyEvent(deviceId, sessionId);
+  if (usageSnapshot) {
+    event.usage_snapshot = usageSnapshot;
+  }
 
   try {
     await uploadEvents(apiBaseUrl, token, deviceId, [event]);
-    markTotalsSent('codex', sessionId, parsed);
+    if (hasTokens) {
+      markTotalsSent('codex', sessionId, parsed);
+    }
   } catch (err) {
     process.stderr.write(`agentboard-codex: upload failed: ${err.message}\n`);
     process.exit(1);

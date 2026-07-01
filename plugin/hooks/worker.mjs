@@ -45,6 +45,9 @@ import { parseOpenCodeSession } from './lib/parse-opencode.mjs';
 import { parseGeminiSession } from './lib/parse-gemini.mjs';
 import { parseAntigravitySession } from './lib/parse-antigravity.mjs';
 import { parseCodexSession } from './lib/parse-codex.mjs';
+import { captureUsageLimitSnapshot } from './lib/usage-limit.mjs';
+
+const USAGE_SNAPSHOT_SOURCES = new Set(['claude_code', 'codex']);
 
 // ─── Source detection ─────────────────────────────────────────────────────────
 
@@ -117,6 +120,24 @@ function buildUsageEvent(deviceId, source, sessionId, parsed) {
     cache_creation_tokens: parsed.cacheCreationTokens ?? 0,
     cache_read_tokens: parsed.cacheReadTokens,
     total_tokens: parsed.totalTokens,
+    collector_version: COLLECTOR_VERSION,
+  };
+}
+
+// A usage-limit-only event: no token data was parsed, but we still have a
+// `/usage`/`/status` snapshot worth uploading. `total_tokens: 0` is valid
+// per the (relaxed) server schema.
+function buildUsageOnlyEvent(deviceId, source, sessionId) {
+  const now = new Date().toISOString();
+  return {
+    schema_version: '1.0',
+    event_id: generateEventId(),
+    device_id: deviceId,
+    source,
+    session_id: sessionId,
+    started_at: now,
+    ended_at: now,
+    total_tokens: 0,
     collector_version: COLLECTOR_VERSION,
   };
 }
@@ -195,13 +216,33 @@ async function main() {
 
   workerLog(`parsed totalTokens=${parsed?.totalTokens ?? 'null'}`);
 
-  if (!parsed || parsed.totalTokens === 0) {
-    workerLog(`SKIP: no tokens (parsed=${parsed ? 'non-null' : 'null'})`);
+  // 5.5 Best-effort usage-limit snapshot (`/usage` or `/status`), fully
+  // independent of token parse outcome — must never block or fail the
+  // existing token-collection path.
+  let usageSnapshot = null;
+  if (USAGE_SNAPSHOT_SOURCES.has(source)) {
+    try {
+      usageSnapshot = await captureUsageLimitSnapshot(source);
+      workerLog(`usageSnapshot=${usageSnapshot ? 'captured' : 'none'}`);
+    } catch (err) {
+      workerLog(`WARN: usage-limit capture threw unexpectedly: ${err.message}`);
+      usageSnapshot = null;
+    }
+  }
+
+  const hasTokens = !!parsed && parsed.totalTokens > 0;
+  if (!hasTokens && !usageSnapshot) {
+    workerLog(`SKIP: no tokens and no usage snapshot (parsed=${parsed ? 'non-null' : 'null'})`);
     process.exit(0);
   }
 
   // 6. Build event
-  const event = buildUsageEvent(deviceId, source, sessionId, parsed);
+  const event = hasTokens
+    ? buildUsageEvent(deviceId, source, sessionId, parsed)
+    : buildUsageOnlyEvent(deviceId, source, sessionId);
+  if (usageSnapshot) {
+    event.usage_snapshot = usageSnapshot;
+  }
 
   // 7. Send to API
   try {

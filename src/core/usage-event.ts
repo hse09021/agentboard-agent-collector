@@ -17,6 +17,20 @@ export const SUPPORTED_SOURCES: AgentSource[] = [
   "antigravity_cli",
 ];
 
+// Best-effort snapshot of a CLI's own rate-limit status (Claude Code `/usage`,
+// Codex `/status`). `raw` is always present, even when parsing fails, so the
+// server can retain it for offline inspection / future re-parsing.
+export interface UsageSnapshot {
+  raw: string;
+  parseOk: boolean;
+  capturedAt: string;
+  planName?: string;
+  fiveHourRemainingPct?: number;
+  weeklyRemainingPct?: number;
+  fiveHourResetAt?: string;
+  weeklyResetAt?: string;
+}
+
 export interface UsageEvent {
   schema_version: "1.0";
   event_id: string;
@@ -36,4 +50,5 @@ export interface UsageEvent {
   collector_version: string;
   os?: "macos" | "windows" | "linux" | "unknown";
   editor?: "vscode" | "jetbrains" | "terminal" | "unknown";
+  usage_snapshot?: UsageSnapshot;
 }
