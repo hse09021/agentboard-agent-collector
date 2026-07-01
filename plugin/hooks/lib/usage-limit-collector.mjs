@@ -29,9 +29,57 @@
  */
 
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 export function claudeUsageCommand() {
   return { command: 'claude', args: ['-p', '/usage'] };
+}
+
+function normalizeClaudePlanName(value) {
+  if (typeof value !== 'string') return undefined;
+
+  const normalized = value.toLowerCase().replace(/[_-]+/g, ' ').trim();
+  if (!normalized) return undefined;
+
+  if (/\bmax\b/.test(normalized) && /\b20x?\b/.test(normalized)) return 'max20x';
+  if (/\bmax\b/.test(normalized) && /\b5x?\b/.test(normalized)) return 'max5x';
+  if (/\bpro\b/.test(normalized)) return 'pro';
+  if (/\bfree\b/.test(normalized)) return 'free';
+  if (/\bteam\b/.test(normalized)) return 'team';
+  if (/\bbusiness\b/.test(normalized)) return 'business';
+  if (/\benterprise\b/.test(normalized)) return 'enterprise';
+
+  return undefined;
+}
+
+/**
+ * Reads Claude Code's local account metadata and returns only the normalized
+ * plan name. Access/refresh tokens are never returned or uploaded.
+ *
+ * @param {{credentialsPath?: string}} [opts]
+ * @returns {string|undefined}
+ */
+export function readClaudeSubscriptionPlan(opts = {}) {
+  const credentialsPath =
+    opts.credentialsPath ?? join(homedir(), '.claude', '.credentials.json');
+
+  try {
+    const parsed = JSON.parse(readFileSync(credentialsPath, 'utf-8'));
+    const account = parsed?.claudeAiOauth;
+    const candidates = [account?.subscriptionType, account?.rateLimitTier];
+
+    for (const candidate of candidates) {
+      const planName = normalizeClaudePlanName(candidate);
+      if (planName) return planName;
+    }
+  } catch {
+    // Best-effort only. Missing/changed credential files must not affect
+    // usage snapshot capture.
+  }
+
+  return undefined;
 }
 
 // NOT SAFE TO USE — see module docstring. Kept only so a future fix has
@@ -61,7 +109,10 @@ export function captureUsageLimitRaw({ command, args, timeoutMs = 8000 }) {
     };
 
     try {
-      child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawn(command, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
     } catch (err) {
       finish({ ok: false, raw: '', exitCode: null, error: err.message });
       return;
@@ -158,7 +209,11 @@ export function readCodexRateLimits({ timeoutMs = 8000, spawnImpl = spawn } = {}
     };
 
     try {
-      child = spawnImpl(command, ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'], shell });
+      child = spawnImpl(command, ['app-server'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        shell,
+        windowsHide: true,
+      });
     } catch (err) {
       finish({ ok: false, raw: '', error: err.message });
       return;

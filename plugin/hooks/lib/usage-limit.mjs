@@ -33,7 +33,12 @@
  *   AGENTBOARD_ENABLE_USAGE_LIMIT_CAPTURE=0 to opt out of both.
  */
 
-import { claudeUsageCommand, captureUsageLimitRaw, readCodexRateLimits } from './usage-limit-collector.mjs';
+import {
+  claudeUsageCommand,
+  captureUsageLimitRaw,
+  readClaudeSubscriptionPlan,
+  readCodexRateLimits,
+} from './usage-limit-collector.mjs';
 import { parseUsageLimitText, normalizeCodexRateLimits } from './parse-usage-limit.mjs';
 import { shouldCaptureUsageLimit, markUsageLimitCaptured } from './usage-limit-throttle.mjs';
 
@@ -41,7 +46,11 @@ async function captureClaudeCode(opts) {
   const { command, args } = claudeUsageCommand();
   const result = await captureUsageLimitRaw({ command, args, timeoutMs: opts.timeoutMs });
   if (!result.raw || !result.raw.trim()) return null;
-  return parseUsageLimitText(result.raw, { source: 'claude_code' });
+  const parsed = parseUsageLimitText(result.raw, { source: 'claude_code' });
+  if (parsed.planName) return parsed;
+
+  const planName = readClaudeSubscriptionPlan();
+  return planName ? { ...parsed, parseOk: true, planName } : parsed;
 }
 
 async function captureCodex(opts) {

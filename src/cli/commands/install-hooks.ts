@@ -74,6 +74,14 @@ function isCodexInstalled(): boolean {
   return isBinaryInPath("codex");
 }
 
+function getHookNodePath(nodePath: string): string {
+  if (process.platform !== "win32") return nodePath;
+  if (path.basename(nodePath).toLowerCase() === "nodew.exe") return nodePath;
+
+  const nodewPath = path.join(path.dirname(nodePath), "nodew.exe");
+  return fs.existsSync(nodewPath) ? nodewPath : nodePath;
+}
+
 // ─── JSON helpers ─────────────────────────────────────────────────────────────
 
 function readJson(filePath: string): Record<string, unknown> {
@@ -341,7 +349,7 @@ export async function installHooksCommand(options: {
     process.exit(1);
   }
 
-  const nodePath = process.execPath;
+  const nodePath = getHookNodePath(process.execPath);
   const sessionEndScript = path.join(hooksDir, "session-end.mjs");
   const codexNotifyScript = path.join(hooksDir, "codex-notify.mjs");
 

@@ -33,6 +33,7 @@ vi.mock('../../plugin/hooks/lib/usage-limit-collector.mjs', async (importOrigina
       exitCode: 0,
       durationMs: 5,
     })),
+    readClaudeSubscriptionPlan: vi.fn(() => 'pro'),
     readCodexRateLimits: vi.fn(async () => ({
       ok: true,
       raw: '{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":11,"windowDurationMins":300,"resetsAt":1782900148},"secondary":{"usedPercent":2,"windowDurationMins":10080,"resetsAt":1783486948},"planType":"plus"}}}',
@@ -89,6 +90,7 @@ describe('captureUsageLimitSnapshot — safety gating', () => {
     const result = await captureUsageLimitSnapshot('claude_code');
     expect(result).not.toBeNull();
     expect(result.parseOk).toBe(true);
+    expect(result.planName).toBe('pro');
   });
 
   it('no-ops for claude_code when explicitly disabled via "0"', async () => {

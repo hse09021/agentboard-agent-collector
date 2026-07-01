@@ -4,7 +4,14 @@
 
 import { describe, it, expect } from 'vitest';
 import { spawn } from 'node:child_process';
-import { captureUsageLimitRaw, readCodexRateLimits } from '../../plugin/hooks/lib/usage-limit-collector.mjs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  captureUsageLimitRaw,
+  readClaudeSubscriptionPlan,
+  readCodexRateLimits,
+} from '../../plugin/hooks/lib/usage-limit-collector.mjs';
 
 // A fake `codex app-server` speaking the same newline-delimited JSON-RPC
 // framing over stdio, so readCodexRateLimits() is exercised through a real
@@ -77,6 +84,54 @@ describe('captureUsageLimitRaw', () => {
     expect(result.error).toBe('timeout');
     expect(result.durationMs).toBeLessThan(5000);
   }, 10000);
+});
+
+describe('readClaudeSubscriptionPlan', () => {
+  it('reads only the normalized subscription type from Claude credentials', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agentboard-claude-credentials-'));
+    const credentialsPath = join(dir, '.credentials.json');
+    writeFileSync(
+      credentialsPath,
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: 'sk-ant-oat01-secret',
+          refreshToken: 'sk-ant-ort01-secret',
+          subscriptionType: 'pro',
+          rateLimitTier: 'default_claude_ai',
+        },
+      })
+    );
+
+    try {
+      expect(readClaudeSubscriptionPlan({ credentialsPath })).toBe('pro');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses rateLimitTier when subscriptionType is too broad to identify a Max tier', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agentboard-claude-credentials-'));
+    const credentialsPath = join(dir, '.credentials.json');
+    writeFileSync(
+      credentialsPath,
+      JSON.stringify({
+        claudeAiOauth: {
+          subscriptionType: 'max',
+          rateLimitTier: 'claude_ai_max_20x',
+        },
+      })
+    );
+
+    try {
+      expect(readClaudeSubscriptionPlan({ credentialsPath })).toBe('max20x');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns undefined for missing or unrecognized credential data', () => {
+    expect(readClaudeSubscriptionPlan({ credentialsPath: '/path/that/does/not/exist' })).toBeUndefined();
+  });
 });
 
 describe('readCodexRateLimits', () => {
