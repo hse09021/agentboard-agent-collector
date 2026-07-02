@@ -28,7 +28,7 @@
  * itself). Both are wired up and on by default.
  */
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -55,10 +55,58 @@ function normalizeClaudePlanName(value) {
 }
 
 /**
+ * Extracts and normalizes the plan name from a raw Claude credentials JSON
+ * string. Shared by the file-based and Keychain-based readers so both go
+ * through the exact same subscriptionType → rateLimitTier precedence.
+ *
+ * @param {string} raw
+ * @returns {string|undefined}
+ */
+function planFromCredentialsJson(raw) {
+  const parsed = JSON.parse(raw);
+  const account = parsed?.claudeAiOauth;
+  const candidates = [account?.subscriptionType, account?.rateLimitTier];
+
+  for (const candidate of candidates) {
+    const planName = normalizeClaudePlanName(candidate);
+    if (planName) return planName;
+  }
+
+  return undefined;
+}
+
+/**
+ * Reads the raw Claude credentials JSON from the macOS Keychain. On macOS,
+ * Claude Code stores OAuth credentials in the login Keychain under the
+ * "Claude Code-credentials" generic-password item and does NOT write
+ * ~/.claude/.credentials.json, so this is the only place the plan name is
+ * available there. Returns '' on any failure (item missing, not macOS, etc.).
+ *
+ * @param {() => string} [execImpl] injectable for tests
+ * @returns {string}
+ */
+function readClaudeKeychainCredentials(
+  execImpl = () =>
+    execFileSync('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], {
+      encoding: 'utf-8',
+    })
+) {
+  try {
+    return execImpl() ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/**
  * Reads Claude Code's local account metadata and returns only the normalized
  * plan name. Access/refresh tokens are never returned or uploaded.
  *
- * @param {{credentialsPath?: string}} [opts]
+ * Looks in the on-disk credentials file first (Linux/Windows, or when the
+ * macOS Keychain is unavailable), then falls back to the macOS Keychain,
+ * where Claude Code actually stores credentials on macOS.
+ *
+ * @param {{credentialsPath?: string, keychainReader?: () => string}} [opts]
  * @returns {string|undefined}
  */
 export function readClaudeSubscriptionPlan(opts = {}) {
@@ -66,17 +114,24 @@ export function readClaudeSubscriptionPlan(opts = {}) {
     opts.credentialsPath ?? join(homedir(), '.claude', '.credentials.json');
 
   try {
-    const parsed = JSON.parse(readFileSync(credentialsPath, 'utf-8'));
-    const account = parsed?.claudeAiOauth;
-    const candidates = [account?.subscriptionType, account?.rateLimitTier];
-
-    for (const candidate of candidates) {
-      const planName = normalizeClaudePlanName(candidate);
-      if (planName) return planName;
-    }
+    const planName = planFromCredentialsJson(readFileSync(credentialsPath, 'utf-8'));
+    if (planName) return planName;
   } catch {
     // Best-effort only. Missing/changed credential files must not affect
     // usage snapshot capture.
+  }
+
+  // macOS stores credentials in the Keychain, not the file above.
+  if (process.platform === 'darwin' || opts.keychainReader) {
+    try {
+      const raw = readClaudeKeychainCredentials(opts.keychainReader);
+      if (raw) {
+        const planName = planFromCredentialsJson(raw);
+        if (planName) return planName;
+      }
+    } catch {
+      // Best-effort only, same as above.
+    }
   }
 
   return undefined;

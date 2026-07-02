@@ -130,7 +130,63 @@ describe('readClaudeSubscriptionPlan', () => {
   });
 
   it('returns undefined for missing or unrecognized credential data', () => {
-    expect(readClaudeSubscriptionPlan({ credentialsPath: '/path/that/does/not/exist' })).toBeUndefined();
+    // Inject an empty Keychain reader so this stays deterministic on macOS,
+    // where the default reader would otherwise hit the real login Keychain.
+    expect(
+      readClaudeSubscriptionPlan({
+        credentialsPath: '/path/that/does/not/exist',
+        keychainReader: () => '',
+      })
+    ).toBeUndefined();
+  });
+
+  it('falls back to the macOS Keychain when the credentials file is absent', () => {
+    // Mirrors macOS, where Claude Code stores creds in the Keychain and does
+    // not write ~/.claude/.credentials.json.
+    const keychainReader = () =>
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: 'sk-ant-oat01-secret',
+          subscriptionType: 'pro',
+          rateLimitTier: 'default_claude_ai',
+        },
+      });
+
+    expect(
+      readClaudeSubscriptionPlan({
+        credentialsPath: '/path/that/does/not/exist',
+        keychainReader,
+      })
+    ).toBe('pro');
+  });
+
+  it('prefers the credentials file over the Keychain when both are present', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agentboard-claude-credentials-'));
+    const credentialsPath = join(dir, '.credentials.json');
+    writeFileSync(
+      credentialsPath,
+      JSON.stringify({ claudeAiOauth: { subscriptionType: 'max', rateLimitTier: 'claude_ai_max_20x' } })
+    );
+    const keychainReader = () => JSON.stringify({ claudeAiOauth: { subscriptionType: 'pro' } });
+
+    try {
+      expect(readClaudeSubscriptionPlan({ credentialsPath, keychainReader })).toBe('max20x');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not throw when the Keychain reader fails', () => {
+    const keychainReader = () => {
+      throw new Error('security: SecKeychainSearchCopyNext: The specified item could not be found.');
+    };
+
+    expect(
+      readClaudeSubscriptionPlan({
+        credentialsPath: '/path/that/does/not/exist',
+        keychainReader,
+      })
+    ).toBeUndefined();
   });
 });
 
