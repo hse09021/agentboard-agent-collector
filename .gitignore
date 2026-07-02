@@ -5,6 +5,7 @@ dist/
 .env
 .env.local
 coverage/
+CLAUDE.md
 
 # OS
 .DS_Store
