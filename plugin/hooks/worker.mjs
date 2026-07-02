@@ -40,6 +40,7 @@ import {
   getApiBaseUrl,
 } from './lib/config.mjs';
 import { uploadEvents } from './lib/transport.mjs';
+import { assertNoForbiddenFields, sanitizeRawOutput } from './lib/forbidden-data-guard.mjs';
 import { parseClaudeSession } from './lib/parse-claude.mjs';
 import { parseOpenCodeSession } from './lib/parse-opencode.mjs';
 import { parseGeminiSession } from './lib/parse-gemini.mjs';
@@ -241,7 +242,21 @@ async function main() {
     ? buildUsageEvent(deviceId, source, sessionId, parsed)
     : buildUsageOnlyEvent(deviceId, source, sessionId);
   if (usageSnapshot) {
-    event.usage_snapshot = usageSnapshot;
+    event.usage_snapshot = {
+      ...usageSnapshot,
+      raw: sanitizeRawOutput(usageSnapshot.raw),
+    };
+  }
+
+  // 6.5 Privacy guard — never let a field carrying prompt/code/path/command
+  // data reach the upload call. This must run on the exact object being
+  // uploaded, right before the network call.
+  try {
+    assertNoForbiddenFields(event);
+  } catch (err) {
+    workerLog(`BLOCKED: forbidden field detected, upload aborted: ${err.message}`);
+    process.stderr.write(`agentboard-worker: forbidden field detected, upload aborted: ${err.message}\n`);
+    process.exit(1);
   }
 
   // 7. Send to API

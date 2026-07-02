@@ -85,7 +85,6 @@ device/event id — adding anything that could leak content will (and should) br
 |-----|---------|---------|
 | `AGENTBOARD_API_URL` | core-api proxy endpoint | `https://agentboard.kro.kr/api/proxy` |
 | `AGENTBOARD_APP_URL` | OAuth web app URL | derived from API URL origin |
-| `AGENTBOARD_DEBUG` | verbose logging when `1` | off |
 
 Hooks also write a best-effort debug log to `<configdir>/hook-debug.log` (always on) for diagnosing
 the detached worker, since its stdout/stderr are discarded.
