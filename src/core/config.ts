@@ -69,10 +69,6 @@ export function getTokenPath(): string {
   return path.join(getConfigDir(), ".token");
 }
 
-export function getSyncedIdsPath(): string {
-  return path.join(getConfigDir(), "synced.json");
-}
-
 export function getHookSentPath(): string {
   return path.join(getConfigDir(), "hook-sent.json");
 }
