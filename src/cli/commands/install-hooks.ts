@@ -22,22 +22,16 @@ function getClaudeSettingsPath(): string {
   return path.join(HOME, ".claude", "settings.json");
 }
 
-function getGeminiSettingsPath(): string {
-  return path.join(HOME, ".gemini", "settings.json");
-}
-
-function getAntigravitySettingsPath(): string {
-  const nativePath = path.join(HOME, ".antigravity", "settings.json");
-  const migratedDir = path.join(HOME, ".gemini", "antigravity-cli");
-  if (!fs.existsSync(nativePath) && fs.existsSync(migratedDir)) {
-    return getGeminiSettingsPath();
-  }
-  return path.join(HOME, ".antigravity", "settings.json");
-}
-
 function getCodexConfigPath(): string {
   return path.join(HOME, ".codex", "config.toml");
 }
+
+// Config files that older collector versions registered a SessionEnd hook in.
+// Only ever read to clean up, never written to on install.
+const LEGACY_HOOK_SETTINGS_PATHS = [
+  path.join(HOME, ".gemini", "settings.json"),
+  path.join(HOME, ".antigravity", "settings.json"),
+];
 
 // ─── CLI detection ────────────────────────────────────────────────────────────
 
@@ -53,21 +47,6 @@ function isBinaryInPath(bin: string): boolean {
 
 function isClaudeInstalled(): boolean {
   return isBinaryInPath("claude");
-}
-
-function isGeminiInstalled(): boolean {
-  return isBinaryInPath("gemini");
-}
-
-function isAntigravityInstalled(): boolean {
-  const settingsPath = getAntigravitySettingsPath();
-  const settingsDir = path.dirname(settingsPath);
-  return (
-    isBinaryInPath("antigravity") ||
-    fs.existsSync(settingsPath) ||
-    fs.existsSync(settingsDir) ||
-    fs.existsSync(path.join(HOME, ".gemini", "antigravity-cli"))
-  );
 }
 
 function isCodexInstalled(): boolean {
@@ -199,7 +178,7 @@ function unregisterJsonSessionEndHook(
   }
 }
 
-// ─── Claude / Gemini hooks ────────────────────────────────────────────────────
+// ─── Claude Code hook ─────────────────────────────────────────────────────────
 
 function registerClaudeHook(nodeExe: string, scriptPath: string): HookResult {
   return registerJsonSessionEndHook(getClaudeSettingsPath(), {
@@ -213,34 +192,6 @@ function registerClaudeHook(nodeExe: string, scriptPath: string): HookResult {
 
 function unregisterClaudeHook() {
   return unregisterJsonSessionEndHook(getClaudeSettingsPath());
-}
-
-function registerGeminiHook(nodeExe: string, scriptPath: string): HookResult {
-  return registerJsonSessionEndHook(getGeminiSettingsPath(), {
-    type: "command",
-    name: "agentboard-session-end",
-    command: nodeExe,
-    args: [scriptPath],
-    timeout: 10,
-  });
-}
-
-function unregisterGeminiHook() {
-  return unregisterJsonSessionEndHook(getGeminiSettingsPath());
-}
-
-function registerAntigravityHook(nodeExe: string, scriptPath: string): HookResult {
-  return registerJsonSessionEndHook(getAntigravitySettingsPath(), {
-    type: "command",
-    name: "agentboard-session-end",
-    command: nodeExe,
-    args: [scriptPath],
-    timeout: 10,
-  });
-}
-
-function unregisterAntigravityHook() {
-  return unregisterJsonSessionEndHook(getAntigravitySettingsPath());
 }
 
 // ─── Codex CLI hook registration ─────────────────────────────────────────────
@@ -372,38 +323,6 @@ export async function installHooksCommand(options: {
     }
   }
 
-  // ── Antigravity CLI ──────────────────────────────────────────────────────
-  if (!isAntigravityInstalled()) {
-    console.log(`   Antigravity   not installed — skipping`);
-  } else {
-    const result = options.force
-      ? (unregisterAntigravityHook(), registerAntigravityHook(nodePath, sessionEndScript))
-      : registerAntigravityHook(nodePath, sessionEndScript);
-    const antigravityPath = getAntigravitySettingsPath();
-    if (result === "added") {
-      console.log(`✔  Antigravity   → ${antigravityPath}`);
-    } else if (result === "already-registered") {
-      console.log(`   Antigravity   already registered — skipping`);
-    } else {
-      console.warn(`⚠  Antigravity   → could not write ${antigravityPath}`);
-    }
-  }
-
-  // ── Gemini CLI legacy ────────────────────────────────────────────────────
-  if (isGeminiInstalled()) {
-    const result = options.force
-      ? (unregisterGeminiHook(), registerGeminiHook(nodePath, sessionEndScript))
-      : registerGeminiHook(nodePath, sessionEndScript);
-    const geminiPath = getGeminiSettingsPath();
-    if (result === "added") {
-      console.log(`✔  Gemini CLI    → ${geminiPath}`);
-    } else if (result === "already-registered") {
-      console.log(`   Gemini CLI    already registered — skipping`);
-    } else {
-      console.warn(`⚠  Gemini CLI    → could not write ${geminiPath}`);
-    }
-  }
-
   // ── Codex CLI ────────────────────────────────────────────────────────────
   if (!isCodexInstalled()) {
     console.log(`   Codex CLI     not installed — skipping`);
@@ -420,11 +339,6 @@ export async function installHooksCommand(options: {
       console.warn(`⚠  Codex CLI     → could not write ${codexPath}`);
     }
   }
-
-  // ── OpenCode ─────────────────────────────────────────────────────────────
-  console.log(
-    `   OpenCode      → hook via SessionEnd payload (session-end.mjs detects OpenCode automatically)`
-  );
 
   console.log(
     "\nDone. Sessions will be reported automatically after each AI session ends.\n" +
@@ -444,26 +358,22 @@ export async function uninstallHooksCommand(): Promise<void> {
       : `   Claude Code   hook not found — skipping`
   );
 
-  const geminiResult = unregisterGeminiHook();
-  const antigravityResult = unregisterAntigravityHook();
-  console.log(
-    antigravityResult === "removed"
-      ? `✔  Antigravity   hook removed`
-      : `   Antigravity   hook not found — skipping`
-  );
-
-  console.log(
-    geminiResult === "removed"
-      ? `✔  Gemini CLI    hook removed`
-      : `   Gemini CLI    hook not found — skipping`
-  );
-
   const codexResult = unregisterCodexHook();
   console.log(
     codexResult === "removed"
       ? `✔  Codex CLI     notify removed`
       : `   Codex CLI     notify not found — skipping`
   );
+
+  // Hooks written by collector versions that also supported Gemini CLI and
+  // Antigravity. We no longer install these, but we still clean them up so an
+  // upgraded user isn't left with a hook nothing removes.
+  const legacyRemoved = LEGACY_HOOK_SETTINGS_PATHS.filter(
+    (settingsPath) => unregisterJsonSessionEndHook(settingsPath) === "removed"
+  );
+  if (legacyRemoved.length > 0) {
+    console.log(`✔  Legacy hooks  removed from ${legacyRemoved.length} file(s)`);
+  }
 
   console.log("\nDone.");
 }

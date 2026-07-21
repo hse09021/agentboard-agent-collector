@@ -1,14 +1,19 @@
 export const COLLECTOR_VERSION = "0.3.0";
 
-export type AgentSource =
-  | "claude_code"
-  | "codex"
+// Sources this collector actively collects from. Hook registration, session
+// parsing and CLI output are all scoped to these.
+export type AgentSource = "claude_code" | "codex";
+
+// Sources accepted by validation. Wider than AgentSource on purpose: older
+// collector versions still in the wild upload these, and their events must not
+// start failing validation just because we stopped collecting them here.
+export type LegacyAgentSource =
   | "opencode"
   | "github_copilot"
   | "gemini_cli"
   | "antigravity_cli";
 
-export const SUPPORTED_SOURCES: AgentSource[] = [
+export const SUPPORTED_SOURCES: Array<AgentSource | LegacyAgentSource> = [
   "claude_code",
   "codex",
   "opencode",

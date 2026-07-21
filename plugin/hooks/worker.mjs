@@ -42,16 +42,19 @@ import {
 import { uploadEvents } from './lib/transport.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from './lib/forbidden-data-guard.mjs';
 import { parseClaudeSession } from './lib/parse-claude.mjs';
-import { parseOpenCodeSession } from './lib/parse-opencode.mjs';
-import { parseGeminiSession } from './lib/parse-gemini.mjs';
-import { parseAntigravitySession } from './lib/parse-antigravity.mjs';
 import { parseCodexSession } from './lib/parse-codex.mjs';
 import { captureUsageLimitSnapshot } from './lib/usage-limit.mjs';
 
 const USAGE_SNAPSHOT_SOURCES = new Set(['claude_code', 'codex']);
 
+const CODEX_SESSION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // ─── Source detection ─────────────────────────────────────────────────────────
 
+// Only Claude Code and Codex are collected. Anything else — including payloads
+// from tools this collector used to support — returns null and is dropped by
+// the caller, rather than falling back to a guess.
 function detectSource(payload) {
   const transcriptPath = payload.transcript_path ?? payload.transcriptPath ?? '';
   const sessionId =
@@ -62,43 +65,11 @@ function detectSource(payload) {
     return { source: 'claude_code', sessionId, transcriptPath };
   }
 
-  // OpenCode: session_id starting with "ses_" or transcriptPath containing /message/ses_
-  const opencodeMatch =
-    transcriptPath.match(/[/\\]message[/\\](ses_[^/\\]+)[/\\]?/) ??
-    (typeof sessionId === 'string' && sessionId.startsWith('ses_')
-      ? { 1: sessionId }
-      : null);
-  if (opencodeMatch) {
-    return { source: 'opencode', sessionId: opencodeMatch[1], transcriptPath };
-  }
-
-  // Antigravity CLI: session-*.json in ~/.antigravity/tmp/.../chats/
-  if (
-    transcriptPath.endsWith('.json') &&
-    (transcriptPath.includes('.antigravity') ||
-      transcriptPath.includes('antigravity-cli') ||
-      payload.source === 'antigravity_cli' ||
-      payload.source === 'antigravity')
-  ) {
-    return { source: 'antigravity_cli', sessionId, transcriptPath };
-  }
-
-  // Gemini CLI legacy: session-*.json in ~/.gemini/tmp/.../chats/
-  if (
-    transcriptPath.endsWith('.json') &&
-    (transcriptPath.includes('.gemini') || transcriptPath.includes('chats'))
-  ) {
-    return { source: 'gemini_cli', sessionId, transcriptPath };
-  }
-
-  // Codex: session_id without path
-  if (typeof sessionId === 'string' && sessionId && !transcriptPath) {
+  // Codex: bare UUID session_id with no transcript path. Matching the UUID
+  // shape rather than "any id without a path" matters — OpenCode sends
+  // `{session_id: "ses_..."}` with no path too, and must not be read as Codex.
+  if (CODEX_SESSION_ID.test(sessionId ?? '') && !transcriptPath) {
     return { source: 'codex', sessionId, transcriptPath };
-  }
-
-  // Default: assume Claude Code
-  if (transcriptPath) {
-    return { source: 'claude_code', sessionId, transcriptPath };
   }
 
   return null;
@@ -200,12 +171,6 @@ async function main() {
   try {
     if (source === 'claude_code') {
       parsed = parseClaudeSession(transcriptPath);
-    } else if (source === 'opencode') {
-      parsed = parseOpenCodeSession(sessionId);
-    } else if (source === 'gemini_cli') {
-      parsed = parseGeminiSession(transcriptPath);
-    } else if (source === 'antigravity_cli') {
-      parsed = parseAntigravitySession(transcriptPath);
     } else if (source === 'codex') {
       parsed = parseCodexSession(sessionId);
     }

@@ -97,7 +97,7 @@ export function markSessionSent(source, sessionId) {
 // many invocations. Plain session-level dedup (isSessionSent) would upload only
 // the first turn and drop everything after it. For such sources we instead store
 // the cumulative totals already uploaded and upload only the delta each turn.
-// Other tools (claude/gemini/opencode) keep using isSessionSent/markSessionSent.
+// Claude Code keeps using isSessionSent/markSessionSent.
 
 const ZERO_TOTALS = {
   inputTokens: 0,
