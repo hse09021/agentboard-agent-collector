@@ -1,4 +1,8 @@
-import { UsageEvent, SUPPORTED_SOURCES } from "./usage-event";
+import {
+  AgentSource,
+  LegacyAgentSource,
+  SUPPORTED_SOURCES,
+} from "./usage-event";
 import { assertNoForbiddenFields, ForbiddenDataError } from "./forbidden-data-guard";
 
 export interface ValidationResult {
@@ -31,7 +35,10 @@ export function validateUsageEvent(event: unknown): ValidationResult {
     errors.push("device_id must be a non-empty string");
   }
 
-  if (!e.source || !SUPPORTED_SOURCES.includes(e.source as UsageEvent["source"])) {
+  if (
+    !e.source ||
+    !SUPPORTED_SOURCES.includes(e.source as AgentSource | LegacyAgentSource)
+  ) {
     errors.push(`source must be one of: ${SUPPORTED_SOURCES.join(", ")}`);
   }
 

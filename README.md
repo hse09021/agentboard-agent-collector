@@ -1,12 +1,12 @@
 # AgentBoard — AI Agent Usage Collector
 
-AI 코딩 도구(Claude Code, Codex, OpenCode, GitHub Copilot, Gemini CLI)의 토큰 사용량을 자동으로 수집하여 [AgentBoard](https://agentboard.kro.kr)로 전송하는 경량 CLI 도구입니다.
+AI 코딩 도구(Claude Code, Codex)의 토큰 사용량을 자동으로 수집하여 [AgentBoard](https://agentboard.kro.kr)로 전송하는 경량 CLI 도구입니다.
 
 ## 특징
 
 - **프라이버시 우선** — 프롬프트, 코드, 파일 경로, 저장소 정보는 절대 수집하지 않습니다. 오직 토큰 카운트와 타임스탬프만 전송됩니다.
 - **비동기 전송** — 훅 스크립트가 즉시 종료된 후 백그라운드 워커가 업로드를 처리하여 AI 도구의 응답속도에 영향을 주지 않습니다.
-- **다중 도구 지원** — Claude Code, Codex CLI, OpenCode, GitHub Copilot, Gemini CLI 동시 지원
+- **지원 도구** — Claude Code, Codex CLI 동시 지원
 
 ## 요구 사항
 
@@ -98,7 +98,7 @@ agentboard login
 agentboard install-hooks
 ```
 
-지원하는 AI 도구(Claude Code, Gemini CLI, Codex CLI)에 세션 종료 훅을 자동으로 등록합니다.  
+지원하는 AI 도구(Claude Code, Codex CLI)에 세션 종료 훅을 자동으로 등록합니다.  
 이미 등록된 훅을 강제로 재등록하려면:
 
 ```bash
@@ -149,9 +149,7 @@ plugin/hooks/session-end.mjs   (stdin → 임시파일 저장, 즉시 종료)
 plugin/hooks/worker.mjs        (소스 감지 → 세션 파싱 → 중복 제거 → 업로드)
       │
       ├── lib/parse-claude.mjs
-      ├── lib/parse-codex.mjs
-      ├── lib/parse-gemini.mjs
-      └── lib/parse-opencode.mjs
+      └── lib/parse-codex.mjs
 ```
 
 Codex의 경우 매 턴마다 `codex-notify.mjs`가 호출되어 세션 중에도 점진적으로 데이터를 수집합니다.

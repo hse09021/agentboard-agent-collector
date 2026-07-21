@@ -46,13 +46,15 @@ function fmtCost(usd: number): string {
 }
 
 function fmtSource(source: string): string {
+  // Sources we collect, plus names for legacy sources that may still appear in
+  // usage history uploaded by older collector versions.
   const names: Record<string, string> = {
     claude: "Claude Code",
     claude_code: "Claude Code",
+    codex: "Codex CLI  ",
     gemini: "Gemini CLI ",
     gemini_cli: "Gemini CLI ",
     antigravity_cli: "Antigravity",
-    codex: "Codex CLI  ",
     opencode: "OpenCode   ",
     github_copilot: "GH Copilot ",
   };
@@ -136,9 +138,6 @@ export async function statusCommand(): Promise<void> {
   logger.plain("─".repeat(40));
 
   const home = os.homedir();
-  const antigravityUsesGeminiDir = fs.existsSync(
-    path.join(home, ".gemini", "antigravity-cli")
-  );
   const hooks: Array<{ name: string; registered: boolean }> = [
     {
       name: "Claude Code",
@@ -148,39 +147,13 @@ export async function statusCommand(): Promise<void> {
       ),
     },
     {
-      name: "Antigravity",
-      registered: isHookRegistered(
-        path.join(home, ".antigravity", "settings.json"),
-        (c) => c.includes("agentboard")
-      ) || isHookRegistered(
-        path.join(home, ".gemini", "settings.json"),
-        (c) => c.includes("agentboard") && antigravityUsesGeminiDir
-      ),
-    },
-    {
-      name: "Gemini CLI  ",
-      registered: isHookRegistered(
-        path.join(home, ".gemini", "settings.json"),
-        (c) => c.includes("agentboard")
-      ),
-    },
-    {
-      name: "Codex CLI   ",
+      name: "Codex CLI  ",
       registered: isHookRegistered(
         path.join(home, ".codex", "config.toml"),
         (c) => c.includes("agentboard")
       ),
     },
-    {
-      name: "OpenCode    ",
-      registered: isHookRegistered(
-        path.join(home, ".config", "opencode", "config.json"),
-        (c) => c.includes("agentboard")
-      ),
-    },
-  ].filter(
-    (hook) => hook.name.trim() !== "Gemini CLI" || !antigravityUsesGeminiDir
-  );
+  ];
 
   for (const { name, registered } of hooks) {
     const icon = registered ? chalk.green("✔") : chalk.dim("○");
