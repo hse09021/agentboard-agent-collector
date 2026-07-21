@@ -4,9 +4,8 @@
  *
  * Registered as a SessionEnd hook for:
  *   - Claude Code  (~/.claude/settings.json  → hooks.SessionEnd)
- *   - OpenCode     (plugin system)
- *   - Antigravity CLI (~/.antigravity/settings.json  → hooks.SessionEnd)
- *   - Gemini CLI legacy (~/.gemini/settings.json  → hooks.SessionEnd)
+ *
+ * Codex is collected through codex-notify.mjs instead (~/.codex/config.toml).
  *
  * The hook runner (the AI tool) invokes this script and writes the hook
  * payload to stdin as JSON. This script:

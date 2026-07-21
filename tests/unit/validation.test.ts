@@ -55,6 +55,8 @@ describe("validateUsageEvent", () => {
     expect(result.errors.some((e) => e.includes("source"))).toBe(true);
   });
 
+  // Only claude_code and codex are collected now, but validation still accepts
+  // the legacy sources so events from older collectors keep validating.
   it("accepts all valid sources", () => {
     const sources = [
       "claude_code",
