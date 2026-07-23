@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 /**
- * agentboard session-end hook entry point
+ * agentboard Claude Code hook entry point
  *
- * Registered as a SessionEnd hook for:
- *   - Claude Code  (~/.claude/settings.json  → hooks.SessionEnd)
+ * Registered in ~/.claude/settings.json under two events, same script:
+ *   - Stop        (per turn — usage reaches the dashboard as the session runs)
+ *   - SessionEnd  (final sweep at session close)
+ * The worker uploads per-session deltas behind a lock, so firing on both
+ * events never double-counts.
  *
  * Codex is collected through codex-notify.mjs instead (~/.codex/config.toml).
  *

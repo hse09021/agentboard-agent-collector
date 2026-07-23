@@ -37,6 +37,8 @@ import {
   getSentTotals,
   markTotalsSent,
   computeDelta,
+  acquireSessionLock,
+  releaseSessionLock,
   COLLECTOR_VERSION,
   getApiBaseUrl,
 } from './lib/config.mjs';
@@ -160,6 +162,16 @@ async function main() {
 
   const { source, sessionId, transcriptPath } = detected;
   workerLog(`source=${source} sessionId=${sessionId} transcriptPath=${transcriptPath}`);
+
+  // 3.5 One in-flight upload per session. Must be taken before reading the
+  // sent-totals ledger: a concurrent worker that read the same totals would
+  // upload an overlapping delta the server can't dedup. Skipping is safe —
+  // this invocation's tokens ride along in the next invocation's delta.
+  if (!acquireSessionLock(source, sessionId)) {
+    workerLog(`SKIP: another worker holds the lock for ${source}:${sessionId}`);
+    process.exit(0);
+  }
+  process.on('exit', () => releaseSessionLock(source, sessionId));
 
   // 4. Parse session
   //

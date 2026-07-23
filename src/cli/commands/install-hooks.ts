@@ -82,12 +82,13 @@ function writeJson(filePath: string, data: Record<string, unknown>): void {
   });
 }
 
-// ─── Generic JSON SessionEnd hook registration ────────────────────────────────
+// ─── Generic JSON hook registration (SessionEnd, Stop, …) ─────────────────────
 
 type HookResult = "added" | "already-registered" | "skipped";
 
-function registerJsonSessionEndHook(
+function registerJsonHook(
   settingsPath: string,
+  eventName: string,
   hookEntry: Record<string, unknown>
 ): HookResult {
   const settings = readJson(settingsPath);
@@ -96,12 +97,12 @@ function registerJsonSessionEndHook(
     settings.hooks = {};
   }
   const hooks = settings.hooks as Record<string, unknown>;
-  if (!Array.isArray(hooks.SessionEnd)) {
-    hooks.SessionEnd = [];
+  if (!Array.isArray(hooks[eventName])) {
+    hooks[eventName] = [];
   }
-  const sessionEndArray = hooks.SessionEnd as Array<Record<string, unknown>>;
+  const eventArray = hooks[eventName] as Array<Record<string, unknown>>;
 
-  for (const group of sessionEndArray) {
+  for (const group of eventArray) {
     if (!Array.isArray(group.hooks)) continue;
     for (const h of group.hooks as Array<Record<string, unknown>>) {
       const commandMatch =
@@ -124,7 +125,7 @@ function registerJsonSessionEndHook(
     }
   }
 
-  sessionEndArray.push({ matcher: "", hooks: [hookEntry] });
+  eventArray.push({ matcher: "", hooks: [hookEntry] });
 
   try {
     writeJson(settingsPath, settings);
@@ -134,18 +135,19 @@ function registerJsonSessionEndHook(
   }
 }
 
-function unregisterJsonSessionEndHook(
-  settingsPath: string
+function unregisterJsonHook(
+  settingsPath: string,
+  eventName: string
 ): "removed" | "not-found" {
   if (!fs.existsSync(settingsPath)) return "not-found";
 
   const settings = readJson(settingsPath);
   const hooks = settings.hooks as Record<string, unknown> | undefined;
-  if (!hooks || !Array.isArray(hooks.SessionEnd)) return "not-found";
+  if (!hooks || !Array.isArray(hooks[eventName])) return "not-found";
 
-  const before = (hooks.SessionEnd as unknown[]).length;
-  hooks.SessionEnd = (
-    hooks.SessionEnd as Array<Record<string, unknown>>
+  const before = (hooks[eventName] as unknown[]).length;
+  hooks[eventName] = (
+    hooks[eventName] as Array<Record<string, unknown>>
   )
     .map((group) => {
       if (!Array.isArray(group.hooks)) return group;
@@ -178,20 +180,43 @@ function unregisterJsonSessionEndHook(
   }
 }
 
-// ─── Claude Code hook ─────────────────────────────────────────────────────────
+// ─── Claude Code hooks ────────────────────────────────────────────────────────
+//
+// Registered on two events, same script for both:
+//   Stop       — fires each time Claude finishes a response, so usage shows up
+//                on the dashboard per turn (like Codex's notify hook) instead
+//                of only when the session closes.
+//   SessionEnd — final sweep at session close, catching anything accrued after
+//                the last Stop (e.g. subagent usage). The worker uploads deltas,
+//                so the two events never double-count.
+const CLAUDE_HOOK_EVENTS = ["Stop", "SessionEnd"] as const;
 
-function registerClaudeHook(nodeExe: string, scriptPath: string): HookResult {
-  return registerJsonSessionEndHook(getClaudeSettingsPath(), {
+function claudeHookEntry(nodeExe: string, scriptPath: string) {
+  return {
     type: "command",
     command: nodeExe,
     args: [scriptPath],
     name: "agentboard-session-end",
     timeout: 10,
-  });
+  };
 }
 
-function unregisterClaudeHook() {
-  return unregisterJsonSessionEndHook(getClaudeSettingsPath());
+function registerClaudeHook(nodeExe: string, scriptPath: string): HookResult {
+  const results = CLAUDE_HOOK_EVENTS.map((event) =>
+    registerJsonHook(getClaudeSettingsPath(), event, claudeHookEntry(nodeExe, scriptPath))
+  );
+  // One combined verdict for reporting: any write failure wins, then any
+  // addition (upgrades from SessionEnd-only installs land here), else no-op.
+  if (results.includes("skipped")) return "skipped";
+  if (results.includes("added")) return "added";
+  return "already-registered";
+}
+
+function unregisterClaudeHook(): "removed" | "not-found" {
+  const results = CLAUDE_HOOK_EVENTS.map((event) =>
+    unregisterJsonHook(getClaudeSettingsPath(), event)
+  );
+  return results.includes("removed") ? "removed" : "not-found";
 }
 
 // ─── Codex CLI hook registration ─────────────────────────────────────────────
@@ -315,7 +340,7 @@ export async function installHooksCommand(options: {
       : registerClaudeHook(nodePath, sessionEndScript);
     const claudePath = getClaudeSettingsPath();
     if (result === "added") {
-      console.log(`✔  Claude Code   → ${claudePath}`);
+      console.log(`✔  Claude Code   → ${claudePath} (Stop + SessionEnd)`);
     } else if (result === "already-registered") {
       console.log(`   Claude Code   already registered — skipping`);
     } else {
@@ -369,7 +394,7 @@ export async function uninstallHooksCommand(): Promise<void> {
   // Antigravity. We no longer install these, but we still clean them up so an
   // upgraded user isn't left with a hook nothing removes.
   const legacyRemoved = LEGACY_HOOK_SETTINGS_PATHS.filter(
-    (settingsPath) => unregisterJsonSessionEndHook(settingsPath) === "removed"
+    (settingsPath) => unregisterJsonHook(settingsPath, "SessionEnd") === "removed"
   );
   if (legacyRemoved.length > 0) {
     console.log(`✔  Legacy hooks  removed from ${legacyRemoved.length} file(s)`);

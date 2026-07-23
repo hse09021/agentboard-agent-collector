@@ -22,6 +22,8 @@ import {
   getSentTotals,
   markTotalsSent,
   computeDelta,
+  acquireSessionLock,
+  releaseSessionLock,
   COLLECTOR_VERSION,
   getApiBaseUrl,
 } from './lib/config.mjs';
@@ -115,6 +117,19 @@ async function main() {
   if (!config || !token) {
     process.exit(0);
   }
+
+  // One in-flight upload per thread. Notify fires per turn, and a slow run
+  // (retry loop + upload) can still be going when the next turn's notify
+  // starts; both would read the same sent-totals and upload overlapping
+  // deltas. The lock is keyed on the notify payload's thread id — a losing
+  // invocation exits and its tokens ride along in the next turn's delta.
+  // Pinned to a const because `sessionId` may be reassigned below (latest-
+  // session fallback), and release must use the exact key that was acquired.
+  const lockSessionId = sessionId;
+  if (!acquireSessionLock('codex', lockSessionId)) {
+    process.exit(0);
+  }
+  process.on('exit', () => releaseSessionLock('codex', lockSessionId));
 
   // Run best-effort, throttled `/status` capture concurrently with the
   // token-parse retry loop below — never lets a slow/failed CLI call delay

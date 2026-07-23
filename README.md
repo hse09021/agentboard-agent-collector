@@ -98,7 +98,9 @@ agentboard login
 agentboard install-hooks
 ```
 
-지원하는 AI 도구(Claude Code, Codex CLI)에 세션 종료 훅을 자동으로 등록합니다.  
+지원하는 AI 도구(Claude Code, Codex CLI)에 세션 훅을 자동으로 등록합니다.
+Claude Code는 `Stop`(매 턴) + `SessionEnd`(세션 종료) 두 이벤트에, Codex CLI는 `notify`(매 턴)에 등록되어
+대화가 진행되는 동안에도 사용량이 대시보드에 반영됩니다.  
 이미 등록된 훅을 강제로 재등록하려면:
 
 ```bash
@@ -140,19 +142,22 @@ agentboard logout
 ## 훅 아키텍처
 
 ```
-AI 도구 세션 종료
+Claude Code 턴 종료(Stop) / 세션 종료(SessionEnd)
       │
       ▼
 plugin/hooks/session-end.mjs   (stdin → 임시파일 저장, 즉시 종료)
       │
       ▼  (detached 프로세스)
-plugin/hooks/worker.mjs        (소스 감지 → 세션 파싱 → 중복 제거 → 업로드)
+plugin/hooks/worker.mjs        (소스 감지 → 세션 락 → 파싱 → 델타 계산 → 업로드)
       │
       ├── lib/parse-claude.mjs
       └── lib/parse-codex.mjs
 ```
 
-Codex의 경우 매 턴마다 `codex-notify.mjs`가 호출되어 세션 중에도 점진적으로 데이터를 수집합니다.
+업로드는 델타 방식입니다: 세션별로 이미 전송한 누적 토큰을 기록해 두고, 훅이 발동할 때마다
+그 이후 늘어난 만큼만 전송합니다. 같은 세션의 훅이 겹쳐 실행되는 경우(매 턴 발동)에는
+세션 단위 락이 중복 업로드를 막습니다. Codex의 경우 매 턴마다 `codex-notify.mjs`가 호출되어
+동일한 델타·락 방식으로 세션 중에도 점진적으로 데이터를 수집합니다.
 
 ## 설정
 

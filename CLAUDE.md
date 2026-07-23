@@ -31,31 +31,33 @@ module. Commands: `login`, `logout`, `status`, `doctor`, `install-hooks`, `unins
 The CLI manages auth, device registration, and hook installation — it does **not** parse sessions
 or upload usage at runtime.
 
-`install-hooks` registers `plugin/hooks/session-end.mjs` as a SessionEnd hook into each detected
-tool's own config file: Claude Code (`~/.claude/settings.json`), Gemini CLI
-(`~/.gemini/settings.json`), Codex (`~/.codex/config.toml`). It locates the hooks dir relative to
-the compiled file at `dist/cli/commands/` (3 levels up to package root), so the layout of `plugin/`
-vs `dist/` matters.
+`install-hooks` registers hooks into each detected tool's own config file: Claude Code gets
+`plugin/hooks/session-end.mjs` on **both `Stop` (per turn) and `SessionEnd`** in
+`~/.claude/settings.json`; Codex gets `codex-notify.mjs` as the `notify` command (per turn) in
+`~/.codex/config.toml`. It locates the hooks dir relative to the compiled file at
+`dist/cli/commands/` (3 levels up to package root), so the layout of `plugin/` vs `dist/` matters.
 
 ### 2. The hooks (`plugin/hooks/`, plain `.mjs`, shipped as-is)
 These run **outside the compiled TypeScript context**, invoked by the AI tools themselves. The
 upload pipeline lives entirely here, not in `src/`:
 
 ```
-AI tool session ends
+Claude Code turn ends (Stop) / session ends (SessionEnd)
   → session-end.mjs   reads hook payload from stdin, writes it to a temp file in os.tmpdir()/agentboard,
                       spawns worker.mjs detached, and exits immediately (stays under the tool's hook timeout)
-  → worker.mjs        the real work: detectSource() → parse session → dedup → build UsageEvent → upload
+  → worker.mjs        the real work: detectSource() → per-session lock → parse → delta → UsageEvent → upload
        ├ lib/parse-claude.mjs    (transcript .jsonl)
-       ├ lib/parse-codex.mjs     (session id, no path)
-       ├ lib/parse-gemini.mjs    (.json under .gemini/chats)
-       └ lib/parse-opencode.mjs  (session id starting with "ses_")
+       └ lib/parse-codex.mjs     (UUID session id, no path)
 ```
 
 `worker.mjs:detectSource()` infers the tool from the shape of `transcript_path`/`session_id` in
-the payload. Dedup is keyed `source:sessionId` in `~/.agentboard/hook-sent.json`; a session with
-0 tokens is skipped, never uploaded. Codex additionally uses `codex-notify.mjs` (a per-turn notify
-hook) to collect data incrementally during a session.
+the payload; unrecognized shapes are dropped, never guessed. Uploads are **delta-based**: the
+ledger `~/.agentboard/hook-sent.json` stores the cumulative totals already uploaded per
+`source:sessionId`, and each invocation sends only what accrued since (`computeDelta` in
+`lib/config.mjs`). A per-session lock (`acquireSessionLock`, mkdir-based under
+`~/.agentboard/locks/`) keeps overlapping per-turn invocations from uploading the same delta
+twice. Codex is collected by `codex-notify.mjs` (per-turn notify hook) through the same
+delta + lock helpers.
 
 ### The deliberate duplication
 `plugin/hooks/lib/config.mjs` re-implements config-dir resolution, token loading, and ID generation

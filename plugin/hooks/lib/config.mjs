@@ -5,7 +5,14 @@
  * Used by hook scripts that run outside the compiled TypeScript context.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  rmdirSync,
+  statSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -160,6 +167,61 @@ export function computeDelta(cumulative, alreadySent) {
     cacheReadTokens: sub(cur.cacheReadTokens, prev.cacheReadTokens),
     totalTokens: sub(cur.totalTokens, prev.totalTokens),
   };
+}
+
+// ─── Per-session upload lock ──────────────────────────────────────────────────
+//
+// With per-turn hooks (Codex notify, Claude Code Stop), two invocations for the
+// same session can overlap: the worker for turn N is still uploading (snapshot
+// capture and upload retries take seconds) when turn N+1 fires. Both would read
+// the same "already sent" totals and upload overlapping deltas — and since every
+// upload carries a fresh event_id, the server cannot dedup them. The lock makes
+// overlap harmless: the loser exits without uploading, and its tokens are simply
+// covered by the next invocation's delta (deltas are cumulative-based, so a
+// skipped upload never loses data).
+//
+// mkdir is the atomic primitive. A crashed holder (SIGKILL, power loss) leaves
+// the dir behind; anything older than LOCK_STALE_MS is treated as dead and
+// taken over, which is far longer than any legitimate hook run.
+
+const LOCKS_DIR = join(CONFIG_DIR, 'locks');
+const LOCK_STALE_MS = 120_000;
+
+function sessionLockDir(source, sessionId) {
+  const safe = String(sessionId).replace(/[^A-Za-z0-9._-]/g, '_');
+  return join(LOCKS_DIR, `${source}__${safe}`);
+}
+
+export function acquireSessionLock(source, sessionId) {
+  const dir = sessionLockDir(source, sessionId);
+  try {
+    mkdirSync(LOCKS_DIR, { recursive: true });
+  } catch {
+    return true; // can't manage locks — don't block collection over it
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      mkdirSync(dir); // non-recursive: throws EEXIST when already held
+      return true;
+    } catch {
+      try {
+        const age = Date.now() - statSync(dir).mtimeMs;
+        if (age < LOCK_STALE_MS) return false;
+        rmdirSync(dir); // stale holder — take over on the retry
+      } catch {
+        return false; // raced with the holder's release/steal; treat as busy
+      }
+    }
+  }
+  return false;
+}
+
+export function releaseSessionLock(source, sessionId) {
+  try {
+    rmdirSync(sessionLockDir(source, sessionId));
+  } catch {
+    /* already gone or stolen — nothing to do */
+  }
 }
 
 // ─── ID generation ────────────────────────────────────────────────────────────
