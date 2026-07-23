@@ -32,11 +32,12 @@ afterEach(() => {
   rmSync(homeDir, { recursive: true, force: true });
 });
 
-const totals = (i, o, c) => ({
+const totals = (i, o, c, cc = 0) => ({
   inputTokens: i,
   outputTokens: o,
+  cacheCreationTokens: cc,
   cacheReadTokens: c,
-  totalTokens: i + o + c,
+  totalTokens: i + o + c + cc,
 });
 
 describe('computeDelta', () => {
@@ -86,6 +87,8 @@ describe('multi-turn Codex session never double-counts', () => {
       summed = {
         inputTokens: summed.inputTokens + delta.inputTokens,
         outputTokens: summed.outputTokens + delta.outputTokens,
+        cacheCreationTokens:
+          summed.cacheCreationTokens + delta.cacheCreationTokens,
         cacheReadTokens: summed.cacheReadTokens + delta.cacheReadTokens,
         totalTokens: summed.totalTokens + delta.totalTokens,
       };
@@ -105,5 +108,42 @@ describe('multi-turn Codex session never double-counts', () => {
     config.markTotalsSent('codex', sessionId, totals(50, 20, 5));
     const delta = config.computeDelta(totals(50, 20, 5), config.getSentTotals('codex', sessionId));
     expect(delta.totalTokens).toBe(0);
+  });
+});
+
+// A Claude Code session can be resumed days after its first SessionEnd, so the
+// same delta accounting has to hold there. Session-level dedup used to upload
+// the first stretch only and silently drop everything the resume added.
+describe('resumed Claude Code session', () => {
+  it('uploads only the tokens added after the session was resumed', () => {
+    const sessionId = '54dd0081-6347-48fc-95c4-0fbcbb885cce';
+    const afterFirstEnd = totals(50, 20, 1800, 300);
+    const afterResume = totals(75, 258, 109037, 4102);
+
+    const first = config.computeDelta(
+      afterFirstEnd,
+      config.getSentTotals('claude_code', sessionId)
+    );
+    config.markTotalsSent('claude_code', sessionId, afterFirstEnd);
+
+    const second = config.computeDelta(
+      afterResume,
+      config.getSentTotals('claude_code', sessionId)
+    );
+
+    expect(second.totalTokens).toBe(
+      afterResume.totalTokens - afterFirstEnd.totalTokens
+    );
+    expect(first.totalTokens + second.totalTokens).toBe(afterResume.totalTokens);
+  });
+
+  it('carries cache creation tokens through the delta', () => {
+    const sessionId = 'cache-create';
+    config.markTotalsSent('claude_code', sessionId, totals(0, 0, 0, 300));
+    const delta = config.computeDelta(
+      totals(0, 0, 0, 4102),
+      config.getSentTotals('claude_code', sessionId)
+    );
+    expect(delta.cacheCreationTokens).toBe(3802);
   });
 });

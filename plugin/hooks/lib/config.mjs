@@ -93,15 +93,16 @@ export function markSessionSent(source, sessionId) {
 
 // ─── Incremental (delta) tracking ─────────────────────────────────────────────
 //
-// Codex fires its notify hook per-turn, so a session's token total grows across
-// many invocations. Plain session-level dedup (isSessionSent) would upload only
-// the first turn and drop everything after it. For such sources we instead store
-// the cumulative totals already uploaded and upload only the delta each turn.
-// Claude Code keeps using isSessionSent/markSessionSent.
+// A session's token total grows across many hook invocations: Codex fires its
+// notify hook per-turn, and a Claude Code session can be resumed long after its
+// first SessionEnd. Plain session-level dedup (isSessionSent) uploads only the
+// first invocation and drops everything after it. So both sources instead store
+// the cumulative totals already uploaded and send only the delta each time.
 
 const ZERO_TOTALS = {
   inputTokens: 0,
   outputTokens: 0,
+  cacheCreationTokens: 0,
   cacheReadTokens: 0,
   totalTokens: 0,
 };
@@ -115,6 +116,7 @@ function normalizeTotals(totals) {
   return {
     inputTokens: nn(totals.inputTokens),
     outputTokens: nn(totals.outputTokens),
+    cacheCreationTokens: nn(totals.cacheCreationTokens),
     cacheReadTokens: nn(totals.cacheReadTokens),
     totalTokens: nn(totals.totalTokens),
   };
@@ -154,6 +156,7 @@ export function computeDelta(cumulative, alreadySent) {
   return {
     inputTokens: sub(cur.inputTokens, prev.inputTokens),
     outputTokens: sub(cur.outputTokens, prev.outputTokens),
+    cacheCreationTokens: sub(cur.cacheCreationTokens, prev.cacheCreationTokens),
     cacheReadTokens: sub(cur.cacheReadTokens, prev.cacheReadTokens),
     totalTokens: sub(cur.totalTokens, prev.totalTokens),
   };

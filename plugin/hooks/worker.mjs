@@ -34,8 +34,9 @@ import {
   loadConfig,
   loadToken,
   generateEventId,
-  isSessionSent,
-  markSessionSent,
+  getSentTotals,
+  markTotalsSent,
+  computeDelta,
   COLLECTOR_VERSION,
   getApiBaseUrl,
 } from './lib/config.mjs';
@@ -160,13 +161,11 @@ async function main() {
   const { source, sessionId, transcriptPath } = detected;
   workerLog(`source=${source} sessionId=${sessionId} transcriptPath=${transcriptPath}`);
 
-  // 4. Dedup check
-  if (isSessionSent(source, sessionId)) {
-    workerLog(`SKIP: already sent session=${sessionId}`);
-    process.exit(0);
-  }
-
-  // 5. Parse session
+  // 4. Parse session
+  //
+  // Dedup happens after parsing, not before: a session can be resumed (Claude
+  // Code) or fire per-turn (Codex), so what matters is how many tokens are new
+  // since the last upload, which is only known once the session is parsed.
   let parsed = null;
   try {
     if (source === 'claude_code') {
@@ -181,6 +180,18 @@ async function main() {
   }
 
   workerLog(`parsed totalTokens=${parsed?.totalTokens ?? 'null'}`);
+
+  // 5. Reduce the cumulative session totals to only what is new since the last
+  // upload. `parsed` is kept as the cumulative figure to persist afterwards.
+  const cumulative = parsed;
+  if (parsed) {
+    const alreadySent = getSentTotals(source, sessionId);
+    const delta = computeDelta(parsed, alreadySent);
+    workerLog(
+      `delta totalTokens=${delta.totalTokens} (cumulative=${parsed.totalTokens}, alreadySent=${alreadySent.totalTokens})`
+    );
+    parsed = { ...parsed, ...delta };
+  }
 
   // 5.5 Best-effort usage-limit snapshot (`/usage` or `/status`), fully
   // independent of token parse outcome — must never block or fail the
@@ -235,8 +246,13 @@ async function main() {
     process.exit(1);
   }
 
-  // 8. Mark sent
-  markSessionSent(source, sessionId);
+  // 8. Record the cumulative totals now uploaded, so the next invocation for
+  // this session only sends what accrues after this point. Skipped when the
+  // session had no tokens at all (usage-snapshot-only upload) — writing zeroed
+  // totals there would discard what a previous invocation had already recorded.
+  if (cumulative) {
+    markTotalsSent(source, sessionId, cumulative);
+  }
   workerLog('done');
   process.exit(0);
 }
