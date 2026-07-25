@@ -52,6 +52,17 @@ async function readStdin() {
 async function main() {
   debugLog(`hook invoked pid=${process.pid}`);
 
+  // Recursion guard: the usage-limit snapshot runs `claude -p /usage`, which
+  // starts a headless Claude Code session that fires its own Stop/SessionEnd
+  // hooks. That child is tagged with AGENTBOARD_INTERNAL=1, which propagates
+  // into these hooks. Bail out immediately so the ghost session never reaches
+  // the worker (where it would upload a bogus event and trigger *another*
+  // /usage capture, recursing again).
+  if (process.env.AGENTBOARD_INTERNAL === '1') {
+    debugLog('SKIP: internal invocation (AGENTBOARD_INTERNAL=1), not collecting');
+    process.exit(0);
+  }
+
   let payloadText = '';
   try {
     payloadText = await readStdin();

@@ -122,6 +122,14 @@ function buildUsageOnlyEvent(deviceId, source, sessionId) {
 async function main() {
   workerLog(`started pid=${process.pid} argv=${JSON.stringify(process.argv.slice(2))}`);
 
+  // Recursion guard (defense-in-depth; session-end.mjs already bails earlier).
+  // The usage-limit snapshot runs `claude -p /usage`, whose hooks inherit
+  // AGENTBOARD_INTERNAL=1. Never collect for that internal invocation.
+  if (process.env.AGENTBOARD_INTERNAL === '1') {
+    workerLog('SKIP: internal invocation (AGENTBOARD_INTERNAL=1), not collecting');
+    process.exit(0);
+  }
+
   const payloadFile = process.argv[2];
   if (!payloadFile) {
     workerLog('ERROR: no payload file argument');

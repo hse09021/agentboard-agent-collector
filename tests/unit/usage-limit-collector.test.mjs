@@ -84,6 +84,20 @@ describe('captureUsageLimitRaw', () => {
     expect(result.error).toBe('timeout');
     expect(result.durationMs).toBeLessThan(5000);
   }, 10000);
+
+  it('injects AGENTBOARD_INTERNAL=1 into the spawned child so its hooks self-skip', async () => {
+    // `claude -p /usage` starts a headless Claude Code session that fires this
+    // collector's own Stop/SessionEnd hooks. That recursion is broken by
+    // tagging the child's env; the hook entry points bail on this flag. Prove
+    // the child actually receives it.
+    const result = await captureUsageLimitRaw({
+      command: process.execPath,
+      args: ['-e', 'process.stdout.write(process.env.AGENTBOARD_INTERNAL ?? "unset")'],
+      timeoutMs: 5000,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.raw).toBe('1');
+  });
 });
 
 describe('readClaudeSubscriptionPlan', () => {

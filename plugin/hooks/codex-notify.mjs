@@ -104,6 +104,13 @@ function buildUsageOnlyEvent(deviceId, sessionId) {
 }
 
 async function main() {
+  // Recursion guard: mirrors session-end.mjs. The Claude usage-limit snapshot
+  // spawns `claude -p /usage` with AGENTBOARD_INTERNAL=1; anything it launches
+  // inherits that env, so refuse to collect when it's set.
+  if (process.env.AGENTBOARD_INTERNAL === '1') {
+    process.exit(0);
+  }
+
   let sessionId = parseSessionId();
 
   if (!sessionId) {

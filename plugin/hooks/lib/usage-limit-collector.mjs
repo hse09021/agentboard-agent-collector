@@ -167,6 +167,13 @@ export function captureUsageLimitRaw({ command, args, timeoutMs = 8000 }) {
       child = spawn(command, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
+        // `claude -p /usage` starts a headless Claude Code session, which
+        // creates its own transcript .jsonl and fires this collector's own
+        // Stop/SessionEnd hooks — a recursive re-entry that used to upload
+        // ghost sessions. Tagging the child's environment lets the hook entry
+        // point (session-end.mjs) recognize its own internal invocation and
+        // bail out before spawning a worker.
+        env: { ...process.env, AGENTBOARD_INTERNAL: '1' },
       });
     } catch (err) {
       finish({ ok: false, raw: '', exitCode: null, error: err.message });
