@@ -3,7 +3,16 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { parseUsageLimitText, normalizeCodexRateLimits } from '../../plugin/hooks/lib/parse-usage-limit.mjs';
+import { parseUsageLimitText, normalizeCodexRateLimits, parseResetTime } from '../../plugin/hooks/lib/parse-usage-limit.mjs';
+
+// Builds the expected ISO the same way parseResetTime does (local wall-clock,
+// future-anchored year) so assertions hold regardless of the test machine's
+// timezone or the current year.
+const expectedResetIso = (now, month, day, hour, minute) => {
+  let d = new Date(now.getFullYear(), month, day, hour, minute);
+  if (d.getTime() < now.getTime()) d = new Date(now.getFullYear() + 1, month, day, hour, minute);
+  return d.toISOString();
+};
 
 describe('parseUsageLimitText — Claude Code /usage output', () => {
   it('extracts 5h and weekly remaining percentages', () => {
@@ -69,15 +78,14 @@ describe('parseUsageLimitText — real Claude Code 2.1.197 "/usage" output', () 
     expect(result.weeklyRemainingPct).toBe(93);
   });
 
-  it('leaves the reset time unset rather than guess at "MMM D, Npm (Zone)" phrasing', () => {
-    // Real Claude Code reset times ("Jul 1, 7pm (Asia/Seoul)") have no year,
-    // an informal hour, and a non-standard timezone abbreviation — `Date`
-    // can't parse this, so parseResetTime() correctly returns undefined
-    // rather than a silently wrong timestamp. Not used by recommend.ts
-    // (only the percentages and plan name feed the recommendation), so this
-    // is a known display-only gap, not a correctness bug.
+  it('parses the "MMM D, Npm (Zone)" reset phrasing as a local wall-clock time', () => {
+    // Real Claude Code reset times ("Jul 1, 7pm (Asia/Seoul)") have no year and
+    // an informal hour. Since the hook runs on the same machine Claude rendered
+    // them on, they're read as local time; the zone in parens equals local.
+    const now = new Date();
     const result = parseUsageLimitText(raw, { source: 'claude_code' });
-    expect(result.fiveHourResetAt).toBeUndefined();
+    expect(result.fiveHourResetAt).toBe(expectedResetIso(now, 6, 1, 19, 0)); // Jul 1, 7pm
+    expect(result.weeklyResetAt).toBe(expectedResetIso(now, 6, 3, 0, 0)); // Jul 3, 12am
   });
 });
 
@@ -286,5 +294,42 @@ describe('normalizeCodexRateLimits — real codex-cli 0.142.5 app-server output'
     expect(() => normalizeCodexRateLimits(null, '')).not.toThrow();
     expect(() => normalizeCodexRateLimits(undefined, undefined)).not.toThrow();
     expect(normalizeCodexRateLimits(null, '').parseOk).toBe(false);
+  });
+});
+
+describe('parseResetTime — Claude local-timezone reset phrasing', () => {
+  it('parses "MMM D, H:MMam (Zone)" as local wall-clock time', () => {
+    const now = new Date('2026-07-20T00:00:00Z');
+    expect(parseResetTime('Jul 27, 12:40am (Asia/Seoul)', now)).toBe(
+      expectedResetIso(now, 6, 27, 0, 40)
+    );
+  });
+
+  it('parses the "MMM D at H:MMpm" variant', () => {
+    const now = new Date('2026-07-20T00:00:00Z');
+    expect(parseResetTime('Jul 26 at 10:10pm (Asia/Seoul)', now)).toBe(
+      expectedResetIso(now, 6, 26, 22, 10)
+    );
+  });
+
+  it('handles minute-less "Npm" and the 12am/12pm edges', () => {
+    const now = new Date('2026-07-01T00:00:00Z');
+    expect(parseResetTime('Jul 1, 7pm (Asia/Seoul)', now)).toBe(expectedResetIso(now, 6, 1, 19, 0));
+    expect(parseResetTime('Jul 3, 12am (Asia/Seoul)', now)).toBe(expectedResetIso(now, 6, 3, 0, 0));
+    expect(parseResetTime('Jul 3, 12pm (Asia/Seoul)', now)).toBe(expectedResetIso(now, 6, 3, 12, 0));
+  });
+
+  it('rolls a past date into next year (a reset is always in the future)', () => {
+    const now = new Date('2026-12-31T20:00:00Z');
+    // "Jan 2" is before Dec 31 in the current year → next year.
+    const result = parseResetTime('Jan 2, 3pm (Asia/Seoul)', now);
+    expect(new Date(result).getTime()).toBeGreaterThan(now.getTime());
+    expect(result).toBe(expectedResetIso(now, 0, 2, 15, 0));
+  });
+
+  it('still parses ISO strings and returns undefined for junk', () => {
+    expect(parseResetTime('2026-07-01T18:00:00Z')).toBe('2026-07-01T18:00:00.000Z');
+    expect(parseResetTime('not a date at all')).toBeUndefined();
+    expect(parseResetTime('')).toBeUndefined();
   });
 });

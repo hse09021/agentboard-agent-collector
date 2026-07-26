@@ -66,9 +66,43 @@ function toRemainingPct(rawPct, qualifier) {
   return qualifier && qualifier.toLowerCase() === 'used' ? 100 - n : n;
 }
 
-function parseResetTime(text) {
+const MONTH_INDEX = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+  jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+};
+
+// Claude Code renders reset times in the machine's LOCAL timezone, e.g.
+// "Jul 27, 12:40am (Asia/Seoul)" or "Jul 26 at 10:10pm (Asia/Seoul)". The hook
+// runs on that same machine, so we read it as a local wall-clock time — Date's
+// numeric constructor is local, and toISOString() converts to UTC — with no
+// timezone-name parsing or offset math (DST is handled by the runtime). The
+// parenthesized zone therefore equals the local one and is ignored.
+const NL_RESET =
+  /\b([A-Za-z]{3})[a-z]*\s+(\d{1,2})(?:,|\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i;
+
+export function parseResetTime(text, now = new Date()) {
   if (!text) return undefined;
   const trimmed = text.trim();
+
+  const nl = trimmed.match(NL_RESET);
+  if (nl) {
+    const month = MONTH_INDEX[nl[1].toLowerCase()];
+    const day = Number(nl[2]);
+    let hour = Number(nl[3]) % 12; // 12am -> 0, 12pm handled by the +12 below
+    if (nl[5].toLowerCase() === 'pm') hour += 12;
+    const minute = nl[4] ? Number(nl[4]) : 0;
+    if (month !== undefined && day >= 1 && day <= 31 && hour <= 23 && minute <= 59) {
+      // The year is absent; a reset is always in the future, so use the current
+      // year and roll forward if that lands in the past (handles Dec -> Jan).
+      let candidate = new Date(now.getFullYear(), month, day, hour, minute);
+      if (candidate.getTime() < now.getTime()) {
+        candidate = new Date(now.getFullYear() + 1, month, day, hour, minute);
+      }
+      if (!Number.isNaN(candidate.getTime())) return candidate.toISOString();
+    }
+  }
+
+  // ISO / other Date-parseable strings (e.g. "2026-07-01T18:00:00Z").
   const parsed = new Date(trimmed);
   if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
   return undefined;
