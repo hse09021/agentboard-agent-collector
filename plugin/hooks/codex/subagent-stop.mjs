@@ -18,50 +18,24 @@
  */
 
 import { parseCodexFile } from './parse-codex.mjs';
+import { buildUsageEvent } from './event.mjs';
 import {
   loadConfig,
   loadToken,
-  generateEventId,
   getSentTotals,
   markTotalsSent,
   computeDelta,
-  COLLECTOR_VERSION,
   getApiBaseUrl,
 } from '../lib/config.mjs';
 import { uploadEvents } from '../lib/transport.mjs';
 import { assertNoForbiddenFields } from '../lib/forbidden-data-guard.mjs';
+import { readStdin } from '../lib/read-stdin.mjs';
 
 const RETRY_MAX = 6;
 const RETRY_DELAY_MS = 1500;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function readStdin() {
-  const chunks = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks).toString('utf-8');
-}
-
-function buildSubagentEvent(deviceId, parentSessionId, parsed, delta) {
-  return {
-    schema_version: '1.0',
-    event_id: generateEventId(),
-    device_id: deviceId,
-    source: 'codex',
-    model: parsed.model,
-    session_id: parentSessionId,
-    started_at: parsed.startedAt,
-    ended_at: parsed.endedAt ?? new Date().toISOString(),
-    input_tokens: delta.inputTokens,
-    output_tokens: delta.outputTokens,
-    cache_read_tokens: delta.cacheReadTokens,
-    total_tokens: delta.totalTokens,
-    collector_version: COLLECTOR_VERSION,
-  };
 }
 
 async function main() {
@@ -92,7 +66,7 @@ async function main() {
   if (!config || !token) process.exit(0);
 
   // The child rollout may still be flushing when the hook fires — retry like
-  // codex-notify does for the parent session file.
+  // notify.mjs does for the parent session file.
   let parsed = null;
   for (let attempt = 0; attempt < RETRY_MAX; attempt++) {
     parsed = parseCodexFile(transcriptPath);
@@ -113,7 +87,9 @@ async function main() {
 
   const deviceId = config.device_id;
   const apiBaseUrl = getApiBaseUrl(config);
-  const event = buildSubagentEvent(deviceId, parentSessionId, parsed, delta);
+  // Uploaded under the PARENT session id so the subagent's tokens roll into
+  // that session rather than spawning a phantom one.
+  const event = buildUsageEvent(deviceId, parentSessionId, parsed, delta);
 
   try {
     assertNoForbiddenFields(event);

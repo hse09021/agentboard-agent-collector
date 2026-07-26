@@ -482,7 +482,7 @@ export async function installHooksCommand(options: {
 
   const nodePath = getHookNodePath(process.execPath);
   const sessionEndScript = path.join(hooksDir, "claude", "session-end.mjs");
-  const codexNotifyScript = path.join(hooksDir, "codex", "codex-notify.mjs");
+  const codexNotifyScript = path.join(hooksDir, "codex", "notify.mjs");
   const codexSessionEndScript = path.join(hooksDir, "codex", "session-end.mjs");
   const codexSubagentStopScript = path.join(hooksDir, "codex", "subagent-stop.mjs");
 

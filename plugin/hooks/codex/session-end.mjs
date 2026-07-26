@@ -22,60 +22,21 @@
  */
 
 import { parseCodexSession } from './parse-codex.mjs';
+import { buildUsageEvent, buildUsageOnlyEvent } from './event.mjs';
 import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
 import {
   loadConfig,
   loadToken,
-  generateEventId,
   getSentTotals,
   markTotalsSent,
   computeDelta,
-  COLLECTOR_VERSION,
+  acquireSessionLock,
+  releaseSessionLock,
   getApiBaseUrl,
 } from '../lib/config.mjs';
 import { uploadEvents } from '../lib/transport.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
-
-async function readStdin() {
-  const chunks = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks).toString('utf-8');
-}
-
-function buildUsageEvent(deviceId, sessionId, parsed, delta) {
-  return {
-    schema_version: '1.0',
-    event_id: generateEventId(),
-    device_id: deviceId,
-    source: 'codex',
-    model: parsed.model,
-    session_id: sessionId,
-    started_at: parsed.startedAt,
-    ended_at: parsed.endedAt ?? new Date().toISOString(),
-    input_tokens: delta.inputTokens,
-    output_tokens: delta.outputTokens,
-    cache_read_tokens: delta.cacheReadTokens,
-    total_tokens: delta.totalTokens,
-    collector_version: COLLECTOR_VERSION,
-  };
-}
-
-function buildUsageOnlyEvent(deviceId, sessionId) {
-  const now = new Date().toISOString();
-  return {
-    schema_version: '1.0',
-    event_id: generateEventId(),
-    device_id: deviceId,
-    source: 'codex',
-    session_id: sessionId,
-    started_at: now,
-    ended_at: now,
-    total_tokens: 0,
-    collector_version: COLLECTOR_VERSION,
-  };
-}
+import { readStdin } from '../lib/read-stdin.mjs';
 
 async function main() {
   if (process.env.AGENTBOARD_INTERNAL === '1') process.exit(0);
@@ -108,22 +69,31 @@ async function main() {
     minIntervalMs: 0,
   }).catch(() => null);
 
-  // 2. Guarded parent-session token residue sweep. Only sweep a session the
-  //    per-turn notify has already reported (alreadySent > 0): that both proves
-  //    the SessionEnd `session_id` matches the id notify keys the ledger on
-  //    (otherwise the lookup would miss and we'd re-upload the whole session as
-  //    a bogus "delta", double-counting) and gives a cumulative baseline to
-  //    diff against. Any session with tokens has fired notify at least once, so
-  //    this never drops legitimate tokens.
+  // 2. Guarded parent-session token residue sweep, under the SAME per-session
+  //    lock notify.mjs takes. A final notify still uploading this session
+  //    could otherwise race us into double-counting the residue. The lock is
+  //    acquired AFTER the (slow) snapshot capture so it's held only for the
+  //    quick parse+upload, and the snapshot upload below never depends on it —
+  //    if we lose the lock we skip only the token sweep, not the snapshot.
+  //
+  //    We also only sweep a session notify has already reported (alreadySent
+  //    > 0): that proves the SessionEnd `session_id` matches the id notify keys
+  //    the ledger on (otherwise the lookup would miss and we'd re-upload the
+  //    whole session as a bogus "delta") and gives a baseline to diff against.
+  //    Any session with tokens has fired notify at least once, so this never
+  //    drops legitimate tokens.
   let parsed = null;
   let delta = null;
   let hasTokens = false;
-  const alreadySent = getSentTotals('codex', sessionId);
-  if (alreadySent.totalTokens > 0) {
-    parsed = parseCodexSession(sessionId);
-    if (parsed && parsed.totalTokens > 0) {
-      delta = computeDelta(parsed, alreadySent);
-      hasTokens = delta.totalTokens > 0;
+  if (acquireSessionLock('codex', sessionId)) {
+    process.on('exit', () => releaseSessionLock('codex', sessionId));
+    const alreadySent = getSentTotals('codex', sessionId);
+    if (alreadySent.totalTokens > 0) {
+      parsed = parseCodexSession(sessionId);
+      if (parsed && parsed.totalTokens > 0) {
+        delta = computeDelta(parsed, alreadySent);
+        hasTokens = delta.totalTokens > 0;
+      }
     }
   }
 

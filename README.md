@@ -151,7 +151,7 @@ plugin/hooks/claude/session-end.mjs   (stdin → 임시파일 저장, 즉시 종
 plugin/hooks/claude/worker.mjs        (Claude 수집 → 세션 락 → 파싱 → 델타 계산 → 업로드)
       └── plugin/hooks/claude/parse-claude.mjs
 
-Codex 턴 종료(notify)          → plugin/hooks/codex/codex-notify.mjs   (매 턴: 부모 세션 파싱 → 델타 → 업로드)
+Codex 턴 종료(notify)          → plugin/hooks/codex/notify.mjs         (매 턴: 부모 세션 파싱 → 델타 → 업로드)
 Codex 세션 종료(SessionEnd)    → plugin/hooks/codex/session-end.mjs    (rate-limit 강제 캡처 + 부모 잔여 스윕)
 Codex 서브에이전트 종료(SubagentStop) → plugin/hooks/codex/subagent-stop.mjs (자식 rollout 파싱 → 부모 세션에 합산)
       └── plugin/hooks/codex/parse-codex.mjs
@@ -164,7 +164,7 @@ Codex 서브에이전트 종료(SubagentStop) → plugin/hooks/codex/subagent-st
 
 업로드는 델타 방식입니다: 세션별로 이미 전송한 누적 토큰을 기록해 두고, 훅이 발동할 때마다
 그 이후 늘어난 만큼만 전송합니다. 같은 세션의 훅이 겹쳐 실행되는 경우(매 턴 발동)에는
-세션 단위 락이 중복 업로드를 막습니다. Codex의 경우 매 턴마다 `codex-notify.mjs`가 호출되어
+세션 단위 락이 중복 업로드를 막습니다. Codex의 경우 매 턴마다 `codex/notify.mjs`가 호출되어
 동일한 델타·락 방식으로 세션 중에도 점진적으로 데이터를 수집합니다.
 
 ## 설정

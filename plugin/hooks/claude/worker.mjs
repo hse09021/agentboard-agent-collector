@@ -1,16 +1,20 @@
 #!/usr/bin/env node
 /**
- * agentboard session-end background worker
+ * agentboard Claude Code background worker
  *
- * Called by session-end.mjs with one argument: path to a temp JSON payload.
+ * The heavy half of the Claude Code hook. claude/session-end.mjs (registered on
+ * both Stop and SessionEnd) captures the payload and spawns this worker
+ * detached, so the interactive session never blocks on collection. Invoked with
+ * one argument: the path to a temp JSON payload.
  *
  * Workflow:
- *   1. Read payload file (and delete it)
- *   2. Detect AI tool source from transcript_path / payload fields
- *   3. Parse the session to extract token usage
- *   4. Skip if already sent (dedup via hook-sent.json)
- *   5. Build a UsageEvent and POST to the agentboard API
- *   6. Mark session as sent
+ *   1. Read & delete the payload file
+ *   2. Confirm it's a Claude Code session (detectSource; anything else is dropped)
+ *   3. Parse the transcript (incl. <session>/subagents/*.jsonl) for cumulative usage
+ *   4. Reduce to the delta since the last upload (dedup via hook-sent.json)
+ *   5. On SessionEnd, force a rate-limit snapshot (per-turn Stop stays throttled)
+ *   6. Build a UsageEvent, run the privacy guard, POST to the agentboard API
+ *   7. Record the cumulative totals as sent
  */
 
 import { unlinkSync, readFileSync, mkdirSync, appendFileSync } from 'node:fs';
@@ -59,7 +63,7 @@ import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
 // ─── Source detection ─────────────────────────────────────────────────────────
 
 // This worker only collects Claude Code (Codex is collected separately by
-// codex/codex-notify.mjs). Anything else — including payloads from tools this
+// codex/notify.mjs). Anything else — including payloads from tools this
 // collector used to support — returns null and is dropped by the caller,
 // rather than falling back to a guess.
 function detectSource(payload) {

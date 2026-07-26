@@ -49,7 +49,7 @@ function searchDir(dir, sessionId) {
   return null;
 }
 
-function findCodexSessionFile(sessionId) {
+export function findCodexSessionFile(sessionId) {
   const sessionsDir = getCodexSessionsDir();
   if (!existsSync(sessionsDir)) return null;
   return searchDir(sessionsDir, sessionId);
@@ -74,7 +74,7 @@ function collectSessionFiles(dir, out = []) {
   return out;
 }
 
-function findLatestCodexSessionFile() {
+export function findLatestCodexSessionFile() {
   const sessionsDir = getCodexSessionsDir();
   if (!existsSync(sessionsDir)) return null;
 

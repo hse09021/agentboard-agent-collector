@@ -3,7 +3,7 @@
  * agentboard Codex CLI notify hook
  *
  * Registered in ~/.codex/config.toml as:
- *   notify = ["/path/to/node", "/path/to/codex-notify.mjs"]
+ *   notify = ["/path/to/node", "/path/to/codex/notify.mjs"]
  *
  * Codex CLI calls this script after each turn (not just session end),
  * passing a JSON payload as the last argument:
@@ -14,17 +14,20 @@
  * short delay before giving up.
  */
 
-import { parseCodexSession, parseLatestCodexSession } from './parse-codex.mjs';
+import {
+  parseCodexFile,
+  findCodexSessionFile,
+  findLatestCodexSessionFile,
+} from './parse-codex.mjs';
+import { buildUsageEvent, buildUsageOnlyEvent } from './event.mjs';
 import {
   loadConfig,
   loadToken,
-  generateEventId,
   getSentTotals,
   markTotalsSent,
   computeDelta,
   acquireSessionLock,
   releaseSessionLock,
-  COLLECTOR_VERSION,
   getApiBaseUrl,
 } from '../lib/config.mjs';
 import { uploadEvents } from '../lib/transport.mjs';
@@ -66,42 +69,6 @@ function parseSessionId() {
 
   if (raw && !raw.startsWith('-') && raw.length > 8) return raw;
   return null;
-}
-
-function buildUsageEvent(deviceId, sessionId, parsed, delta) {
-  return {
-    schema_version: '1.0',
-    event_id: generateEventId(),
-    device_id: deviceId,
-    source: 'codex',
-    model: parsed.model,
-    session_id: sessionId,
-    started_at: parsed.startedAt,
-    ended_at: parsed.endedAt ?? new Date().toISOString(),
-    input_tokens: delta.inputTokens,
-    output_tokens: delta.outputTokens,
-    cache_read_tokens: delta.cacheReadTokens,
-    total_tokens: delta.totalTokens,
-    collector_version: COLLECTOR_VERSION,
-  };
-}
-
-// A usage-limit-only event: no new token delta this turn, but a `/status`
-// snapshot is still worth uploading. Valid per the (relaxed) server schema,
-// which allows `total_tokens: 0`.
-function buildUsageOnlyEvent(deviceId, sessionId) {
-  const now = new Date().toISOString();
-  return {
-    schema_version: '1.0',
-    event_id: generateEventId(),
-    device_id: deviceId,
-    source: 'codex',
-    session_id: sessionId,
-    started_at: now,
-    ended_at: now,
-    total_tokens: 0,
-    collector_version: COLLECTOR_VERSION,
-  };
 }
 
 async function main() {
@@ -148,13 +115,25 @@ async function main() {
   // a real turn, stays permanently unused.)
   const usageSnapshotPromise = captureUsageLimitSnapshot('codex').catch(() => null);
 
+  // The retry loop exists because codex may not have flushed the turn's tokens
+  // yet — only the file's CONTENTS change across attempts, not which file it is.
+  // So resolve the path instead of re-parsing via a fresh tree walk each time:
+  //  - `findCodexSessionFile` (walk-by-name) is retried only until the id-matched
+  //    file exists (a brand-new session file can appear a beat late), then cached.
+  //  - the latest-session fallback (`findLatestCodexSessionFile`, which stat()s
+  //    every file) is computed at most once, not every attempt.
+  let sessionFile = null; // id-matched file, once found
+  let latestFallback; // undefined = not yet computed; null = computed, none found
   let parsed = null;
   for (let attempt = 0; attempt < RETRY_MAX; attempt++) {
-    parsed = parseCodexSession(sessionId);
-    if (!parsed) {
-      parsed = parseLatestCodexSession();
-      if (parsed?.sessionId) sessionId = parsed.sessionId;
+    if (!sessionFile) sessionFile = findCodexSessionFile(sessionId);
+    let fileToParse = sessionFile;
+    if (!fileToParse) {
+      if (latestFallback === undefined) latestFallback = findLatestCodexSessionFile();
+      fileToParse = latestFallback;
     }
+    parsed = fileToParse ? parseCodexFile(fileToParse) : null;
+    if (parsed?.sessionId) sessionId = parsed.sessionId;
     if (parsed && parsed.totalTokens > 0) break;
     if (attempt < RETRY_MAX - 1) await sleep(RETRY_DELAY_MS);
   }

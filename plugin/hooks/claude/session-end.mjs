@@ -8,8 +8,6 @@
  * The worker uploads per-session deltas behind a lock, so firing on both
  * events never double-counts.
  *
- * Codex is collected through codex-notify.mjs instead (~/.codex/config.toml).
- *
  * The hook runner (the AI tool) invokes this script and writes the hook
  * payload to stdin as JSON. This script:
  *   1. Reads the full payload from stdin
@@ -23,6 +21,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { readStdin } from '../lib/read-stdin.mjs';
 
 const HOOKS_DIR = fileURLToPath(new URL('.', import.meta.url));
 const WORKER_PATH = join(HOOKS_DIR, 'worker.mjs');
@@ -39,14 +38,6 @@ function debugLog(msg) {
     mkdirSync(dirname(DEBUG_LOG), { recursive: true });
     appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] ${msg}\n`);
   } catch {}
-}
-
-async function readStdin() {
-  const chunks = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks).toString('utf-8');
 }
 
 async function main() {

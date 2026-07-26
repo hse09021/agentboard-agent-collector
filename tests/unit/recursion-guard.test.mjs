@@ -84,8 +84,8 @@ describe('AGENTBOARD_INTERNAL recursion guard', () => {
     expect(log).not.toContain('cannot read payload');
   });
 
-  it('codex-notify.mjs exits 0 when the flag is set', async () => {
-    const { code } = await runHook('codex/codex-notify.mjs', {
+  it('codex/notify.mjs exits 0 when the flag is set', async () => {
+    const { code } = await runHook('codex/notify.mjs', {
       env: { AGENTBOARD_INTERNAL: '1' },
       args: [JSON.stringify({ 'thread-id': '019f8549-9838-7750-ae2c-020b06441074' })],
     });
