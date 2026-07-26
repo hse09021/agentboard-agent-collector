@@ -65,6 +65,28 @@ export function loadToken() {
 
 // ─── Session-sent tracking ────────────────────────────────────────────────────
 
+// The delta ledger keeps one entry per session (and per subagent), read and
+// rewritten on every hook invocation. Without pruning it would grow without
+// bound and slow every turn. Entries carry a `sentAt`, so on each write we drop
+// any older than this window. A pruned session that somehow resumes past the
+// window would re-upload its cumulative once (a rare, bounded double-count), so
+// the window is deliberately generous.
+const HOOK_SENT_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+
+function pruneHookSent(sent, nowMs) {
+  for (const key of Object.keys(sent)) {
+    const sentAt = sent[key]?.sentAt;
+    // Entries with no parseable timestamp can't be aged — keep them rather than
+    // risk dropping live state.
+    if (typeof sentAt !== 'string') continue;
+    const ts = Date.parse(sentAt);
+    if (Number.isFinite(ts) && nowMs - ts > HOOK_SENT_MAX_AGE_MS) {
+      delete sent[key];
+    }
+  }
+  return sent;
+}
+
 export function loadHookSent() {
   if (!existsSync(HOOK_SENT_PATH)) return {};
   try {
@@ -76,6 +98,7 @@ export function loadHookSent() {
 
 function saveHookSent(sent) {
   try {
+    pruneHookSent(sent, Date.now());
     mkdirSync(CONFIG_DIR, { recursive: true });
     writeFileSync(HOOK_SENT_PATH, JSON.stringify(sent, null, 2) + '\n', { mode: 0o600 });
   } catch {

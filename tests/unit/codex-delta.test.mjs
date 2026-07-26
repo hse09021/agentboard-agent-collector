@@ -74,6 +74,39 @@ describe('getSentTotals / markTotalsSent round-trip', () => {
   });
 });
 
+describe('hook-sent.json pruning', () => {
+  it('drops entries older than the retention window on the next write', () => {
+    const old = new Date('2020-01-01T00:00:00Z').toISOString();
+    const recent = new Date().toISOString();
+    writeFileSync(
+      config.HOOK_SENT_PATH,
+      JSON.stringify({
+        'codex:old-session': { sentAt: old, totals: totals(100, 50, 10) },
+        'codex:recent-session': { sentAt: recent, totals: totals(5, 5, 0) },
+      })
+    );
+
+    // Any write triggers pruning.
+    config.markTotalsSent('codex', 'new-session', totals(1, 1, 0));
+
+    const sent = config.loadHookSent();
+    expect(sent['codex:old-session']).toBeUndefined(); // pruned
+    expect(sent['codex:recent-session']).toBeDefined(); // within window
+    expect(sent['codex:new-session']).toBeDefined(); // just written
+  });
+
+  it('keeps entries with no parseable sentAt (cannot age them)', () => {
+    writeFileSync(
+      config.HOOK_SENT_PATH,
+      JSON.stringify({ 'codex:no-ts': { totals: totals(3, 3, 0) } })
+    );
+
+    config.markTotalsSent('codex', 'x', totals(1, 1, 0));
+
+    expect(config.loadHookSent()['codex:no-ts']).toBeDefined();
+  });
+});
+
 describe('multi-turn Codex session never double-counts', () => {
   it('sum of per-turn deltas equals the final cumulative total', () => {
     const sessionId = 'thread-abc';
@@ -93,7 +126,7 @@ describe('multi-turn Codex session never double-counts', () => {
         totalTokens: summed.totalTokens + delta.totalTokens,
       };
       // Only persist (mark as uploaded) when a non-zero delta would be sent —
-      // mirrors codex-notify.mjs which skips upload + persist on a zero delta.
+      // mirrors codex/notify.mjs which skips upload + persist on a zero delta.
       if (delta.totalTokens > 0) {
         config.markTotalsSent('codex', sessionId, cumulative);
       }
