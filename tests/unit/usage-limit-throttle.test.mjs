@@ -29,7 +29,7 @@ describe('shouldCaptureUsageLimit', () => {
 
   it('returns false right after a capture within the min interval', () => {
     markUsageLimitCaptured('claude_code', { configDir });
-    expect(shouldCaptureUsageLimit('claude_code', { configDir, minIntervalMs: 15 * 60_000 })).toBe(false);
+    expect(shouldCaptureUsageLimit('claude_code', { configDir, minIntervalMs: 10 * 60_000 })).toBe(false);
   });
 
   it('returns true once the min interval has elapsed', () => {
@@ -39,7 +39,7 @@ describe('shouldCaptureUsageLimit', () => {
       statePath,
       JSON.stringify({ claude_code: { lastCapturedAt: new Date(Date.now() - 20 * 60_000).toISOString() } })
     );
-    expect(shouldCaptureUsageLimit('claude_code', { configDir, minIntervalMs: 15 * 60_000 })).toBe(true);
+    expect(shouldCaptureUsageLimit('claude_code', { configDir, minIntervalMs: 10 * 60_000 })).toBe(true);
   });
 
   it('tracks sources independently', () => {

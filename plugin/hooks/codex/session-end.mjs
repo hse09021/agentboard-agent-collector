@@ -5,9 +5,9 @@
  * Registered in ~/.codex/hooks.json under `SessionEnd` (fires on normal close,
  * archive/delete of an open conversation, or after ~30 min idle). Two jobs,
  * both best-effort:
- *   1. Force a fresh rate-limit snapshot (bypassing the 15-min throttle) so the
+ *   1. Force a fresh rate-limit snapshot (bypassing the 10-min throttle) so the
  *      dashboard's "resting" 5h/weekly value reflects the true end-of-session
- *      state instead of a reading up to 15 min stale.
+ *      state instead of a reading up to 10 min stale.
  *   2. A guarded parent-session token residue sweep: upload any tokens that
  *      accrued after the last per-turn notify (a final-turn write race, or an
  *      abnormal close where notify never fired). Delta-based, so it uploads

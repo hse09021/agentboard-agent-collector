@@ -223,8 +223,8 @@ async function main() {
   // 5.5 Best-effort usage-limit snapshot (`/usage`), fully independent of token
   // parse outcome — must never block or fail the existing token-collection path.
   // On SessionEnd (the last invocation before the session goes idle) bypass the
-  // 15-min throttle so the resting 5h/weekly value reflects the true
-  // end-of-session state rather than a reading up to 15 min stale; per-turn Stop
+  // 10-min throttle so the resting 5h/weekly value reflects the true
+  // end-of-session state rather than a reading up to 10 min stale; per-turn Stop
   // invocations stay throttled.
   let usageSnapshot = null;
   if (source === 'claude_code') {

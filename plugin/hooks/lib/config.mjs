@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 
-export const COLLECTOR_VERSION = '0.3.0';
+export const COLLECTOR_VERSION = '0.4.0';
 export const DEFAULT_API_URL = process.env.AGENTBOARD_API_URL ?? 'https://agentboard.kro.kr/api/proxy';
 
 function stripTrailingSlash(url) {

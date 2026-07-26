@@ -13,7 +13,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CONFIG_DIR } from './config.mjs';
 
-const DEFAULT_MIN_INTERVAL_MS = 15 * 60_000;
+// Minimum gap between rate-limit captures per source. A capture only happens
+// when a hook fires (per-turn Stop / notify) AND this much time has elapsed, so
+// this is an upper bound on cadence, not a background timer. SessionEnd bypasses
+// it (minIntervalMs: 0) for a fresh end-of-session value.
+const DEFAULT_MIN_INTERVAL_MS = 10 * 60_000;
 
 export function getUsageLimitStatePath(configDir = CONFIG_DIR) {
   return join(configDir, 'usage-limit-state.json');
