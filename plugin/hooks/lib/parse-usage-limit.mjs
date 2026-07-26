@@ -139,6 +139,15 @@ export function parseUsageLimitText(raw, _ctx = {}) {
  * windows are matched by `windowDurationMins` (shorter = five-hour bucket,
  * longer = weekly bucket) rather than assumed by position.
  *
+ * `primary`/`secondary` are matched to the five-hour vs weekly slot by each
+ * window's own `windowDurationMins`, NOT by position or by how many are
+ * present. Real accounts return only ONE window in some states — e.g. a Plus
+ * account whose app-server reports just `primary` (windowDurationMins 10080 =
+ * 7 days, the *weekly* bucket) with `secondary: null`. Assigning by position
+ * there would mislabel that weekly reading as the five-hour value and leave
+ * weekly blank; a window ≤ a day is the short/session bucket, anything longer
+ * (weekly 10080, or a free-plan 30-day 43200 cap) is the weekly/rolling one.
+ *
  * @param {object} rpcResult - the `result` field of the JSON-RPC response
  *   (i.e. `{ rateLimits: {...}, ... }`)
  * @param {string} raw - raw JSON-RPC response line, stored verbatim for
@@ -149,6 +158,10 @@ export function parseUsageLimitText(raw, _ctx = {}) {
  *   fiveHourResetAt?: string, weeklyResetAt?: string
  * }}
  */
+// A window whose rolling period is at most this long is the short/"5h" bucket;
+// anything longer (weekly 10080, monthly 43200) is the weekly/rolling cap.
+const SHORT_WINDOW_MAX_MINS = 1440; // 1 day
+
 export function normalizeCodexRateLimits(rpcResult, raw) {
   const text = typeof raw === 'string' ? raw : '';
   const rl = rpcResult?.rateLimits;
@@ -157,8 +170,16 @@ export function normalizeCodexRateLimits(rpcResult, raw) {
   const windows = [rl.primary, rl.secondary].filter(
     (w) => w && typeof w.usedPercent === 'number'
   );
-  windows.sort((a, b) => (a.windowDurationMins ?? Infinity) - (b.windowDurationMins ?? Infinity));
-  const [fiveHourWindow, weeklyWindow] = windows;
+  const byDurationAsc = (a, b) =>
+    (a.windowDurationMins ?? Infinity) - (b.windowDurationMins ?? Infinity);
+  // Unknown-duration windows fall through to the weekly/rolling slot (Infinity),
+  // matching the prior behavior of sorting nulls to the end.
+  const fiveHourWindow = windows
+    .filter((w) => (w.windowDurationMins ?? Infinity) <= SHORT_WINDOW_MAX_MINS)
+    .sort(byDurationAsc)[0];
+  const weeklyWindow = windows
+    .filter((w) => (w.windowDurationMins ?? Infinity) > SHORT_WINDOW_MAX_MINS)
+    .sort(byDurationAsc)[0];
 
   const toRemaining = (w) => (w ? clampPct(100 - w.usedPercent) : undefined);
   const toResetIso = (w) =>

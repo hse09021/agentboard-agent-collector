@@ -242,6 +242,40 @@ describe('normalizeCodexRateLimits — real codex-cli 0.142.5 app-server output'
     expect(result.fiveHourRemainingPct).toBe(89); // not 100 (the Spark sub-bucket's 0% used)
   });
 
+  it('maps a lone weekly window (windowDurationMins 10080, secondary null) to weekly, not 5h', () => {
+    // Real captured shape for a Plus account (2026-07-26): the app-server
+    // returns a single `primary` window whose duration is 7 days (the weekly
+    // bucket) with `secondary: null`. Slotting by position would mislabel this
+    // as the 5-hour value and leave weekly blank — it must land in weekly.
+    const plusResult = {
+      rateLimits: {
+        limitId: 'codex',
+        primary: { usedPercent: 1, windowDurationMins: 10080, resetsAt: 1785649578 },
+        secondary: null,
+        planType: 'plus',
+      },
+    };
+    const result = normalizeCodexRateLimits(plusResult, JSON.stringify({ id: 2, result: plusResult }));
+    expect(result.parseOk).toBe(true);
+    expect(result.weeklyRemainingPct).toBe(99);
+    expect(result.fiveHourRemainingPct).toBeUndefined();
+    expect(result.weeklyResetAt).toBe(new Date(1785649578 * 1000).toISOString());
+    expect(result.planName).toBe('plus');
+  });
+
+  it('maps a lone 30-day window (free plan, windowDurationMins 43200) to weekly, not 5h', () => {
+    const freeResult = {
+      rateLimits: {
+        primary: { usedPercent: 42, windowDurationMins: 43200, resetsAt: 1785147098 },
+        secondary: null,
+        planType: 'free',
+      },
+    };
+    const result = normalizeCodexRateLimits(freeResult, JSON.stringify({ id: 2, result: freeResult }));
+    expect(result.weeklyRemainingPct).toBe(58);
+    expect(result.fiveHourRemainingPct).toBeUndefined();
+  });
+
   it('returns parseOk:false when there is no rateLimits field at all', () => {
     const result = normalizeCodexRateLimits({}, '{}');
     expect(result.parseOk).toBe(false);

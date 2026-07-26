@@ -138,14 +138,13 @@ async function main() {
   }
   process.on('exit', () => releaseSessionLock('codex', lockSessionId));
 
-  // Run best-effort, throttled `/status` capture concurrently with the
+  // Run best-effort, throttled rate-limit capture concurrently with the
   // token-parse retry loop below — never lets a slow/failed CLI call delay
-  // or break token collection. NOTE: this currently always resolves to
-  // null for 'codex' — confirmed (codex-cli 0.142.4, see /codex.md) that
-  // `codex exec "/status"` burns a real turn instead of querying status,
-  // so codex capture is hard-disabled in lib/usage-limit.mjs until a safe
-  // headless mechanism exists. Left wired up here so re-enabling it later
-  // is a one-line change in usage-limit.mjs, not a new integration.
+  // or break token collection. Codex capture is ON: it reads rate limits via
+  // `codex app-server`'s stdio JSON-RPC `account/rateLimits/read` (a safe
+  // account-metadata read, no billable turn) — see the SAFETY note in
+  // lib/usage-limit.mjs. (The unsafe `codex exec "/status"` path, which burns
+  // a real turn, stays permanently unused.)
   const usageSnapshotPromise = captureUsageLimitSnapshot('codex').catch(() => null);
 
   let parsed = null;
