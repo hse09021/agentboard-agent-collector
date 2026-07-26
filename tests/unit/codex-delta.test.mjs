@@ -70,7 +70,7 @@ describe('getSentTotals / markTotalsSent round-trip', () => {
   it('is keyed per source + session id', () => {
     config.markTotalsSent('codex', 'sess-1', totals(100, 40, 10));
     expect(config.getSentTotals('codex', 'sess-2')).toEqual(totals(0, 0, 0));
-    expect(config.getSentTotals('gemini', 'sess-1')).toEqual(totals(0, 0, 0));
+    expect(config.getSentTotals('claude_code', 'sess-1')).toEqual(totals(0, 0, 0));
   });
 });
 

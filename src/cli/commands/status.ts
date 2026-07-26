@@ -46,17 +46,10 @@ function fmtCost(usd: number): string {
 }
 
 function fmtSource(source: string): string {
-  // Sources we collect, plus names for legacy sources that may still appear in
-  // usage history uploaded by older collector versions.
   const names: Record<string, string> = {
     claude: "Claude Code",
     claude_code: "Claude Code",
     codex: "Codex CLI  ",
-    gemini: "Gemini CLI ",
-    gemini_cli: "Gemini CLI ",
-    antigravity_cli: "Antigravity",
-    opencode: "OpenCode   ",
-    github_copilot: "GH Copilot ",
   };
   return names[source] ?? source.padEnd(11);
 }

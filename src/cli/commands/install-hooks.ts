@@ -26,12 +26,9 @@ function getCodexConfigPath(): string {
   return path.join(HOME, ".codex", "config.toml");
 }
 
-// Config files that older collector versions registered a SessionEnd hook in.
-// Only ever read to clean up, never written to on install.
-const LEGACY_HOOK_SETTINGS_PATHS = [
-  path.join(HOME, ".gemini", "settings.json"),
-  path.join(HOME, ".antigravity", "settings.json"),
-];
+function getCodexHooksJsonPath(): string {
+  return path.join(HOME, ".codex", "hooks.json");
+}
 
 // ─── CLI detection ────────────────────────────────────────────────────────────
 
@@ -86,6 +83,23 @@ function writeJson(filePath: string, data: Record<string, unknown>): void {
 
 type HookResult = "added" | "already-registered" | "skipped";
 
+// Recognizes a hook this collector wrote, across formats/versions: the script
+// path may live in `command` (older single-string form) or in `args` (current
+// form, where `command` is the node executable), and older entries carry a
+// name of "agentboard-*".
+function isAgentboardHook(h: Record<string, unknown>): boolean {
+  const commandMatch =
+    typeof h.command === "string" &&
+    (h.command.includes("agentboard") || h.command.includes("session-end.mjs"));
+  const nameMatch = typeof h.name === "string" && h.name.includes("agentboard");
+  const argsMatch =
+    Array.isArray(h.args) &&
+    h.args.some(
+      (a) => typeof a === "string" && a.includes("session-end.mjs")
+    );
+  return commandMatch || nameMatch || argsMatch;
+}
+
 function registerJsonHook(
   settingsPath: string,
   eventName: string,
@@ -102,16 +116,17 @@ function registerJsonHook(
   }
   const eventArray = hooks[eventName] as Array<Record<string, unknown>>;
 
+  // Already pointing at the exact current script + command? Just make sure the
+  // group has a matcher field and we're done.
+  const desiredScript = Array.isArray(hookEntry.args)
+    ? hookEntry.args[0]
+    : undefined;
   for (const group of eventArray) {
     if (!Array.isArray(group.hooks)) continue;
     for (const h of group.hooks as Array<Record<string, unknown>>) {
-      const commandMatch =
-        typeof h.command === "string" &&
-        (h.command.includes("agentboard") ||
-          h.command.includes("session-end.mjs"));
-      const nameMatch =
-        typeof h.name === "string" && h.name.includes("agentboard");
-      if (commandMatch || nameMatch) {
+      if (!isAgentboardHook(h)) continue;
+      const script = Array.isArray(h.args) ? h.args[0] : undefined;
+      if (h.command === hookEntry.command && script === desiredScript) {
         if (typeof group.matcher !== "string") {
           group.matcher = "";
           try {
@@ -125,7 +140,23 @@ function registerJsonHook(
     }
   }
 
-  eventArray.push({ matcher: "", hooks: [hookEntry] });
+  // Otherwise re-point: strip every stale agentboard hook (old path or command
+  // format, e.g. from a version before the scripts moved into claude/) so an
+  // upgraded install stops firing a script that no longer exists, then add a
+  // fresh entry.
+  for (const group of eventArray) {
+    if (!Array.isArray(group.hooks)) continue;
+    group.hooks = (group.hooks as Array<Record<string, unknown>>).filter(
+      (h) => !isAgentboardHook(h)
+    );
+  }
+  hooks[eventName] = eventArray.filter(
+    (g) => !Array.isArray(g.hooks) || (g.hooks as unknown[]).length > 0
+  );
+  (hooks[eventName] as Array<Record<string, unknown>>).push({
+    matcher: "",
+    hooks: [hookEntry],
+  });
 
   try {
     writeJson(settingsPath, settings);
@@ -153,15 +184,7 @@ function unregisterJsonHook(
       if (!Array.isArray(group.hooks)) return group;
       group.hooks = (
         group.hooks as Array<Record<string, unknown>>
-      ).filter((h) => {
-        const commandMatch =
-          typeof h.command === "string" &&
-          (h.command.includes("agentboard") ||
-            h.command.includes("session-end.mjs"));
-        const nameMatch =
-          typeof h.name === "string" && h.name.includes("agentboard");
-        return !(commandMatch || nameMatch);
-      });
+      ).filter((h) => !isAgentboardHook(h));
       return group;
     })
     .filter(
@@ -170,7 +193,7 @@ function unregisterJsonHook(
         (group.hooks as unknown[]).length > 0
     );
 
-  if ((hooks.SessionEnd as unknown[]).length === before) return "not-found";
+  if ((hooks[eventName] as unknown[]).length === before) return "not-found";
 
   try {
     writeJson(settingsPath, settings);
@@ -244,7 +267,12 @@ function registerCodexHook(
     }
   }
 
-  if (existing.includes(CODEX_NOTIFY_COMMENT)) {
+  const newLine = buildCodexNotifyLine(nodePath, notifyScript);
+
+  // Already pointing at the exact current line? Nothing to do. Otherwise fall
+  // through and re-write, so an upgraded install whose script path changed
+  // (e.g. moved into codex/) gets re-pointed instead of left stale.
+  if (existing.split("\n").some((l) => l.trim() === newLine.trim())) {
     return "already-registered";
   }
 
@@ -252,7 +280,6 @@ function registerCodexHook(
     .split("\n")
     .filter((l) => !/^\s*notify\s*=/.test(l))
     .join("\n");
-  const newLine = buildCodexNotifyLine(nodePath, notifyScript);
 
   const lines = cleaned.split("\n");
   const firstSectionIdx = lines.findIndex((l) => /^\s*\[/.test(l));
@@ -301,6 +328,134 @@ function unregisterCodexHook(): "removed" | "not-found" {
   }
 }
 
+// ─── Codex hooks.json registration (SessionEnd + SubagentStop) ────────────────
+//
+// The legacy `notify` line (config.toml) only fires per turn on the parent
+// session. The newer hooks.json system additionally exposes `SessionEnd` (final
+// rate-limit snapshot / residue sweep) and `SubagentStop` (subagent tokens live
+// in separate child rollouts the parent never sees). Command hooks receive the
+// payload as JSON on stdin. `notify` is kept for back-compat with older Codex
+// builds that predate hooks.json; on those, this file is simply ignored.
+
+// A hooks.json command hook object has no name field, so ours are recognized by
+// the script path in the command string (the package path contains "agentboard"
+// and the basenames are collector-specific).
+function isAgentboardCommand(cmd: unknown): boolean {
+  return (
+    typeof cmd === "string" &&
+    (cmd.includes("agentboard") ||
+      cmd.includes("subagent-stop.mjs") ||
+      cmd.includes("session-end.mjs"))
+  );
+}
+
+function codexHookCommand(nodePath: string, scriptPath: string): string {
+  return `${JSON.stringify(nodePath)} ${JSON.stringify(scriptPath)}`;
+}
+
+function registerCodexJsonHooks(
+  nodePath: string,
+  sessionEndScript: string,
+  subagentStopScript: string
+): HookResult {
+  const hooksPath = getCodexHooksJsonPath();
+  let root: Record<string, unknown> = {};
+  if (fs.existsSync(hooksPath)) {
+    try {
+      root = readJson(hooksPath);
+    } catch {
+      root = {};
+    }
+  }
+  if (typeof root.hooks !== "object" || root.hooks === null) root.hooks = {};
+  const hooks = root.hooks as Record<string, unknown>;
+
+  const desired: Array<[string, string]> = [
+    ["SessionEnd", codexHookCommand(nodePath, sessionEndScript)],
+    ["SubagentStop", codexHookCommand(nodePath, subagentStopScript)],
+  ];
+
+  let changed = false;
+  for (const [event, command] of desired) {
+    if (!Array.isArray(hooks[event])) hooks[event] = [];
+    const arr = hooks[event] as Array<Record<string, unknown>>;
+
+    const present = arr.some(
+      (g) =>
+        Array.isArray(g.hooks) &&
+        (g.hooks as Array<Record<string, unknown>>).some(
+          (h) => h.command === command
+        )
+    );
+    if (present) continue;
+
+    // Re-point: strip any stale agentboard entry (old path/format) for this
+    // event, then add a fresh one — mirrors the JSON/settings re-point.
+    for (const g of arr) {
+      if (Array.isArray(g.hooks)) {
+        g.hooks = (g.hooks as Array<Record<string, unknown>>).filter(
+          (h) => !isAgentboardCommand(h.command)
+        );
+      }
+    }
+    hooks[event] = arr.filter(
+      (g) => !Array.isArray(g.hooks) || (g.hooks as unknown[]).length > 0
+    );
+    (hooks[event] as Array<Record<string, unknown>>).push({
+      hooks: [{ type: "command", command, timeout: 30 }],
+    });
+    changed = true;
+  }
+
+  if (!changed) return "already-registered";
+  try {
+    fs.mkdirSync(path.dirname(hooksPath), { recursive: true });
+    writeJson(hooksPath, root);
+    return "added";
+  } catch {
+    return "skipped";
+  }
+}
+
+function unregisterCodexJsonHooks(): "removed" | "not-found" {
+  const hooksPath = getCodexHooksJsonPath();
+  if (!fs.existsSync(hooksPath)) return "not-found";
+
+  let root: Record<string, unknown>;
+  try {
+    root = readJson(hooksPath);
+  } catch {
+    return "not-found";
+  }
+  const hooks = root.hooks as Record<string, unknown> | undefined;
+  if (!hooks || typeof hooks !== "object") return "not-found";
+
+  let removed = false;
+  for (const event of Object.keys(hooks)) {
+    if (!Array.isArray(hooks[event])) continue;
+    const arr = hooks[event] as Array<Record<string, unknown>>;
+    for (const g of arr) {
+      if (!Array.isArray(g.hooks)) continue;
+      const before = (g.hooks as unknown[]).length;
+      g.hooks = (g.hooks as Array<Record<string, unknown>>).filter(
+        (h) => !isAgentboardCommand(h.command)
+      );
+      if ((g.hooks as unknown[]).length !== before) removed = true;
+    }
+    hooks[event] = arr.filter(
+      (g) => !Array.isArray(g.hooks) || (g.hooks as unknown[]).length > 0
+    );
+  }
+
+  if (!removed) return "not-found";
+  try {
+    writeJson(hooksPath, root);
+    return "removed";
+  } catch {
+    return "not-found";
+  }
+}
+
 // ─── install-hooks command ─────────────────────────────────────────────────────
 
 export async function installHooksCommand(options: {
@@ -326,8 +481,10 @@ export async function installHooksCommand(options: {
   }
 
   const nodePath = getHookNodePath(process.execPath);
-  const sessionEndScript = path.join(hooksDir, "session-end.mjs");
-  const codexNotifyScript = path.join(hooksDir, "codex-notify.mjs");
+  const sessionEndScript = path.join(hooksDir, "claude", "session-end.mjs");
+  const codexNotifyScript = path.join(hooksDir, "codex", "codex-notify.mjs");
+  const codexSessionEndScript = path.join(hooksDir, "codex", "session-end.mjs");
+  const codexSubagentStopScript = path.join(hooksDir, "codex", "subagent-stop.mjs");
 
   console.log("Installing agentboard session hooks...\n");
 
@@ -349,19 +506,39 @@ export async function installHooksCommand(options: {
   }
 
   // ── Codex CLI ────────────────────────────────────────────────────────────
+  let codexHooksJsonAdded = false;
   if (!isCodexInstalled()) {
     console.log(`   Codex CLI     not installed — skipping`);
   } else {
-    const result = options.force
-      ? (unregisterCodexHook(), registerCodexHook(nodePath, codexNotifyScript))
-      : registerCodexHook(nodePath, codexNotifyScript);
+    if (options.force) {
+      unregisterCodexHook();
+      unregisterCodexJsonHooks();
+    }
+    const result = registerCodexHook(nodePath, codexNotifyScript);
     const codexPath = getCodexConfigPath();
     if (result === "added") {
-      console.log(`✔  Codex CLI     → ${codexPath}`);
+      console.log(`✔  Codex CLI     → ${codexPath} (notify)`);
     } else if (result === "already-registered") {
-      console.log(`   Codex CLI     already registered — skipping`);
+      console.log(`   Codex CLI     notify already registered — skipping`);
     } else {
       console.warn(`⚠  Codex CLI     → could not write ${codexPath}`);
+    }
+
+    // Newer Codex builds also support hooks.json: SessionEnd (final rate-limit
+    // snapshot) and SubagentStop (subagent tokens). Older builds ignore it.
+    const jsonResult = registerCodexJsonHooks(
+      nodePath,
+      codexSessionEndScript,
+      codexSubagentStopScript
+    );
+    const hooksJsonPath = getCodexHooksJsonPath();
+    if (jsonResult === "added") {
+      console.log(`✔  Codex CLI     → ${hooksJsonPath} (SessionEnd + SubagentStop)`);
+      codexHooksJsonAdded = true;
+    } else if (jsonResult === "already-registered") {
+      console.log(`   Codex CLI     hooks.json already registered — skipping`);
+    } else {
+      console.warn(`⚠  Codex CLI     → could not write ${hooksJsonPath}`);
     }
   }
 
@@ -369,6 +546,12 @@ export async function installHooksCommand(options: {
     "\nDone. Sessions will be reported automatically after each AI session ends.\n" +
       "Run `agentboard uninstall-hooks` to remove the hooks."
   );
+  if (codexHooksJsonAdded) {
+    console.log(
+      "\nNote: Codex requires you to review and trust new hooks. Run `/hooks` inside\n" +
+        "Codex (or restart it) and approve the agentboard hooks so they will fire."
+    );
+  }
 }
 
 // ─── uninstall-hooks command ───────────────────────────────────────────────────
@@ -390,15 +573,12 @@ export async function uninstallHooksCommand(): Promise<void> {
       : `   Codex CLI     notify not found — skipping`
   );
 
-  // Hooks written by collector versions that also supported Gemini CLI and
-  // Antigravity. We no longer install these, but we still clean them up so an
-  // upgraded user isn't left with a hook nothing removes.
-  const legacyRemoved = LEGACY_HOOK_SETTINGS_PATHS.filter(
-    (settingsPath) => unregisterJsonHook(settingsPath, "SessionEnd") === "removed"
+  const codexJsonResult = unregisterCodexJsonHooks();
+  console.log(
+    codexJsonResult === "removed"
+      ? `✔  Codex CLI     hooks.json (SessionEnd + SubagentStop) removed`
+      : `   Codex CLI     hooks.json not found — skipping`
   );
-  if (legacyRemoved.length > 0) {
-    console.log(`✔  Legacy hooks  removed from ${legacyRemoved.length} file(s)`);
-  }
 
   console.log("\nDone.");
 }

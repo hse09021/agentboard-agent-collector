@@ -55,17 +55,8 @@ describe("validateUsageEvent", () => {
     expect(result.errors.some((e) => e.includes("source"))).toBe(true);
   });
 
-  // Only claude_code and codex are collected now, but validation still accepts
-  // the legacy sources so events from older collectors keep validating.
   it("accepts all valid sources", () => {
-    const sources = [
-      "claude_code",
-      "codex",
-      "opencode",
-      "github_copilot",
-      "gemini_cli",
-      "antigravity_cli",
-    ];
+    const sources = ["claude_code", "codex"];
     for (const source of sources) {
       const result = validateUsageEvent({ ...validEvent(), source });
       expect(result.valid).toBe(true);

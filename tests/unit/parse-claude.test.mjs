@@ -1,12 +1,12 @@
 /**
- * Tests for plugin/hooks/lib/parse-claude.mjs
+ * Tests for plugin/hooks/claude/parse-claude.mjs
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseClaudeSession } from '../../plugin/hooks/lib/parse-claude.mjs';
+import { parseClaudeSession } from '../../plugin/hooks/claude/parse-claude.mjs';
 
 let tmpDir;
 

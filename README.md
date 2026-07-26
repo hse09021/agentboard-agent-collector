@@ -145,13 +145,21 @@ agentboard logout
 Claude Code 턴 종료(Stop) / 세션 종료(SessionEnd)
       │
       ▼
-plugin/hooks/session-end.mjs   (stdin → 임시파일 저장, 즉시 종료)
+plugin/hooks/claude/session-end.mjs   (stdin → 임시파일 저장, 즉시 종료)
       │
       ▼  (detached 프로세스)
-plugin/hooks/worker.mjs        (소스 감지 → 세션 락 → 파싱 → 델타 계산 → 업로드)
-      │
-      ├── lib/parse-claude.mjs
-      └── lib/parse-codex.mjs
+plugin/hooks/claude/worker.mjs        (Claude 수집 → 세션 락 → 파싱 → 델타 계산 → 업로드)
+      └── plugin/hooks/claude/parse-claude.mjs
+
+Codex 턴 종료(notify)          → plugin/hooks/codex/codex-notify.mjs   (매 턴: 부모 세션 파싱 → 델타 → 업로드)
+Codex 세션 종료(SessionEnd)    → plugin/hooks/codex/session-end.mjs    (rate-limit 강제 캡처 + 부모 잔여 스윕)
+Codex 서브에이전트 종료(SubagentStop) → plugin/hooks/codex/subagent-stop.mjs (자식 rollout 파싱 → 부모 세션에 합산)
+      └── plugin/hooks/codex/parse-codex.mjs
+
+  ※ Codex SessionEnd/SubagentStop은 ~/.codex/hooks.json에 등록되며 `/hooks`로 신뢰 승인이 필요합니다.
+     구버전 Codex는 이 파일을 무시하고 notify만 사용합니다.
+
+공통 모듈은 plugin/hooks/lib/ (config, transport, forbidden-data-guard, usage-limit*)
 ```
 
 업로드는 델타 방식입니다: 세션별로 이미 전송한 누적 토큰을 기록해 두고, 훅이 발동할 때마다

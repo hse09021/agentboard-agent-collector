@@ -101,7 +101,7 @@ describe('captureUsageLimitSnapshot — safety gating', () => {
 
   it('no-ops for an unknown source regardless of opt-in', async () => {
     process.env[ENV_KEY] = '1';
-    const result = await captureUsageLimitSnapshot('opencode');
+    const result = await captureUsageLimitSnapshot('unknown_tool');
     expect(result).toBeNull();
   });
 });

@@ -30,6 +30,15 @@ function workerLog(msg) {
   } catch { /* best-effort */ }
 }
 
+// Absolute lifetime ceiling for the detached worker. Every network call
+// (transport AbortSignal.timeout) and CLI capture (usage-limit timeoutMs, which
+// SIGKILLs its child) is already individually bounded, but this is the last-
+// resort guard: no matter what await hangs, an orphaned worker can never
+// outlive this. Comfortably longer than the sum of those inner timeouts so it
+// only ever fires on a genuine hang, never on slow-but-normal work. `.unref()`
+// so the timer itself never keeps the process alive.
+const WORKER_MAX_LIFETIME_MS = 60_000;
+
 import {
   loadConfig,
   loadToken,
@@ -41,23 +50,18 @@ import {
   releaseSessionLock,
   COLLECTOR_VERSION,
   getApiBaseUrl,
-} from './lib/config.mjs';
-import { uploadEvents } from './lib/transport.mjs';
-import { assertNoForbiddenFields, sanitizeRawOutput } from './lib/forbidden-data-guard.mjs';
-import { parseClaudeSession } from './lib/parse-claude.mjs';
-import { parseCodexSession } from './lib/parse-codex.mjs';
-import { captureUsageLimitSnapshot } from './lib/usage-limit.mjs';
-
-const USAGE_SNAPSHOT_SOURCES = new Set(['claude_code', 'codex']);
-
-const CODEX_SESSION_ID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+} from '../lib/config.mjs';
+import { uploadEvents } from '../lib/transport.mjs';
+import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
+import { parseClaudeSession } from './parse-claude.mjs';
+import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
 
 // ─── Source detection ─────────────────────────────────────────────────────────
 
-// Only Claude Code and Codex are collected. Anything else — including payloads
-// from tools this collector used to support — returns null and is dropped by
-// the caller, rather than falling back to a guess.
+// This worker only collects Claude Code (Codex is collected separately by
+// codex/codex-notify.mjs). Anything else — including payloads from tools this
+// collector used to support — returns null and is dropped by the caller,
+// rather than falling back to a guess.
 function detectSource(payload) {
   const transcriptPath = payload.transcript_path ?? payload.transcriptPath ?? '';
   const sessionId =
@@ -66,13 +70,6 @@ function detectSource(payload) {
   // Claude Code: session JSONL in ~/.claude/projects/.../*.jsonl
   if (transcriptPath.endsWith('.jsonl')) {
     return { source: 'claude_code', sessionId, transcriptPath };
-  }
-
-  // Codex: bare UUID session_id with no transcript path. Matching the UUID
-  // shape rather than "any id without a path" matters — OpenCode sends
-  // `{session_id: "ses_..."}` with no path too, and must not be read as Codex.
-  if (CODEX_SESSION_ID.test(sessionId ?? '') && !transcriptPath) {
-    return { source: 'codex', sessionId, transcriptPath };
   }
 
   return null;
@@ -121,6 +118,13 @@ function buildUsageOnlyEvent(deviceId, source, sessionId) {
 
 async function main() {
   workerLog(`started pid=${process.pid} argv=${JSON.stringify(process.argv.slice(2))}`);
+
+  const watchdog = setTimeout(() => {
+    workerLog(`WATCHDOG: exceeded ${WORKER_MAX_LIFETIME_MS}ms, force-exiting`);
+    process.stderr.write('agentboard-worker: watchdog timeout, force-exiting\n');
+    process.exit(1);
+  }, WORKER_MAX_LIFETIME_MS);
+  watchdog.unref();
 
   // Recursion guard (defense-in-depth; session-end.mjs already bails earlier).
   // The usage-limit snapshot runs `claude -p /usage`, whose hooks inherit
@@ -183,15 +187,14 @@ async function main() {
 
   // 4. Parse session
   //
-  // Dedup happens after parsing, not before: a session can be resumed (Claude
-  // Code) or fire per-turn (Codex), so what matters is how many tokens are new
-  // since the last upload, which is only known once the session is parsed.
+  // Dedup happens after parsing, not before: a Claude Code session can be
+  // resumed and fires on both Stop (per turn) and SessionEnd, so what matters
+  // is how many tokens are new since the last upload, which is only known once
+  // the session is parsed.
   let parsed = null;
   try {
     if (source === 'claude_code') {
       parsed = parseClaudeSession(transcriptPath);
-    } else if (source === 'codex') {
-      parsed = parseCodexSession(sessionId);
     }
   } catch (err) {
     workerLog(`ERROR: parse error [${source}]: ${err.message} stack=${err.stack}`);
@@ -213,14 +216,21 @@ async function main() {
     parsed = { ...parsed, ...delta };
   }
 
-  // 5.5 Best-effort usage-limit snapshot (`/usage` or `/status`), fully
-  // independent of token parse outcome — must never block or fail the
-  // existing token-collection path.
+  // 5.5 Best-effort usage-limit snapshot (`/usage`), fully independent of token
+  // parse outcome — must never block or fail the existing token-collection path.
+  // On SessionEnd (the last invocation before the session goes idle) bypass the
+  // 15-min throttle so the resting 5h/weekly value reflects the true
+  // end-of-session state rather than a reading up to 15 min stale; per-turn Stop
+  // invocations stay throttled.
   let usageSnapshot = null;
-  if (USAGE_SNAPSHOT_SOURCES.has(source)) {
+  if (source === 'claude_code') {
     try {
-      usageSnapshot = await captureUsageLimitSnapshot(source);
-      workerLog(`usageSnapshot=${usageSnapshot ? 'captured' : 'none'}`);
+      const forceCapture = payload.hook_event_name === 'SessionEnd';
+      usageSnapshot = await captureUsageLimitSnapshot(
+        source,
+        forceCapture ? { minIntervalMs: 0 } : {}
+      );
+      workerLog(`usageSnapshot=${usageSnapshot ? 'captured' : 'none'} force=${forceCapture}`);
     } catch (err) {
       workerLog(`WARN: usage-limit capture threw unexpectedly: ${err.message}`);
       usageSnapshot = null;

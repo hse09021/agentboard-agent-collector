@@ -1,12 +1,12 @@
 /**
- * Tests for plugin/hooks/lib/parse-codex.mjs
+ * Tests for plugin/hooks/codex/parse-codex.mjs
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseCodexFile } from '../../plugin/hooks/lib/parse-codex.mjs';
+import { parseCodexFile } from '../../plugin/hooks/codex/parse-codex.mjs';
 
 let tmpDir;
 

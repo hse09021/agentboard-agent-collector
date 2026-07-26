@@ -57,7 +57,7 @@ describe('AGENTBOARD_INTERNAL recursion guard', () => {
   }
 
   it('session-end.mjs exits 0 and self-skips when the flag is set', async () => {
-    const { code } = await runHook('session-end.mjs', {
+    const { code } = await runHook('claude/session-end.mjs', {
       env: { AGENTBOARD_INTERNAL: '1', APPDATA: appData },
       stdin: JSON.stringify({
         session_id: 'c0a98f96-404c-401f-b185-a7c79d420712',
@@ -73,7 +73,7 @@ describe('AGENTBOARD_INTERNAL recursion guard', () => {
   });
 
   it('worker.mjs exits 0 and self-skips when the flag is set', async () => {
-    const { code } = await runHook('worker.mjs', {
+    const { code } = await runHook('claude/worker.mjs', {
       env: { AGENTBOARD_INTERNAL: '1', APPDATA: appData },
       args: ['/tmp/nonexistent-payload.json'],
     });
@@ -85,9 +85,29 @@ describe('AGENTBOARD_INTERNAL recursion guard', () => {
   });
 
   it('codex-notify.mjs exits 0 when the flag is set', async () => {
-    const { code } = await runHook('codex-notify.mjs', {
+    const { code } = await runHook('codex/codex-notify.mjs', {
       env: { AGENTBOARD_INTERNAL: '1' },
       args: [JSON.stringify({ 'thread-id': '019f8549-9838-7750-ae2c-020b06441074' })],
+    });
+    expect(code).toBe(0);
+  });
+
+  it('codex/session-end.mjs exits 0 and self-skips when the flag is set', async () => {
+    const { code } = await runHook('codex/session-end.mjs', {
+      env: { AGENTBOARD_INTERNAL: '1' },
+      stdin: JSON.stringify({ session_id: '019f8549-9838-7750-ae2c-020b06441074' }),
+    });
+    expect(code).toBe(0);
+  });
+
+  it('codex/subagent-stop.mjs exits 0 and self-skips when the flag is set', async () => {
+    const { code } = await runHook('codex/subagent-stop.mjs', {
+      env: { AGENTBOARD_INTERNAL: '1' },
+      stdin: JSON.stringify({
+        session_id: '019f8549-9838-7750-ae2c-020b06441074',
+        agent_id: 'agent-1',
+        agent_transcript_path: '/tmp/does-not-matter.jsonl',
+      }),
     });
     expect(code).toBe(0);
   });
@@ -96,7 +116,7 @@ describe('AGENTBOARD_INTERNAL recursion guard', () => {
     // Sanity check the guard is flag-gated, not always-on: with no flag and no
     // agentboard config/token, the worker still spawns but the pipeline stops
     // at "not logged in" — the point is the SKIP-internal line must be absent.
-    const { code } = await runHook('session-end.mjs', {
+    const { code } = await runHook('claude/session-end.mjs', {
       env: { APPDATA: appData },
       stdin: JSON.stringify({ session_id: 'x', transcript_path: '/tmp/x.jsonl' }),
     });

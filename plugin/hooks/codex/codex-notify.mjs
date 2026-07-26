@@ -14,7 +14,7 @@
  * short delay before giving up.
  */
 
-import { parseCodexSession, parseLatestCodexSession } from './lib/parse-codex.mjs';
+import { parseCodexSession, parseLatestCodexSession } from './parse-codex.mjs';
 import {
   loadConfig,
   loadToken,
@@ -26,9 +26,10 @@ import {
   releaseSessionLock,
   COLLECTOR_VERSION,
   getApiBaseUrl,
-} from './lib/config.mjs';
-import { uploadEvents } from './lib/transport.mjs';
-import { captureUsageLimitSnapshot } from './lib/usage-limit.mjs';
+} from '../lib/config.mjs';
+import { uploadEvents } from '../lib/transport.mjs';
+import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
+import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
 
 const RETRY_MAX = 6;
 const RETRY_DELAY_MS = 1500;
@@ -184,7 +185,20 @@ async function main() {
     ? buildUsageEvent(deviceId, sessionId, parsed, delta)
     : buildUsageOnlyEvent(deviceId, sessionId);
   if (usageSnapshot) {
-    event.usage_snapshot = usageSnapshot;
+    event.usage_snapshot = {
+      ...usageSnapshot,
+      raw: sanitizeRawOutput(usageSnapshot.raw),
+    };
+  }
+
+  // Privacy guard — never let a field carrying prompt/code/path/command data
+  // reach the upload call. Runs on the exact object being uploaded, right
+  // before the network call (mirrors worker.mjs).
+  try {
+    assertNoForbiddenFields(event);
+  } catch (err) {
+    process.stderr.write(`agentboard-codex: forbidden field detected, upload aborted: ${err.message}\n`);
+    process.exit(1);
   }
 
   try {
