@@ -17,8 +17,27 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 
-export const COLLECTOR_VERSION = '0.4.0';
-export const DEFAULT_API_URL = process.env.AGENTBOARD_API_URL ?? 'https://agentboard.kro.kr/api/proxy';
+export const COLLECTOR_VERSION = '0.5.0';
+export const DEFAULT_API_URL = process.env.AGENTBOARD_API_URL ?? 'https://agentboard.cloud/api/proxy';
+
+// agentboard.kro.kr was the original host and no longer serves the API. A saved
+// config always wins over DEFAULT_API_URL, so installs from before the move would
+// keep uploading to a dead host forever — rewrite the host whenever a config is
+// read. Keep in sync with src/core/config.ts.
+const LEGACY_HOSTS = new Set(['agentboard.kro.kr', 'www.agentboard.kro.kr']);
+const CURRENT_HOST = 'agentboard.cloud';
+
+function migrateLegacyHost(url) {
+  try {
+    const parsed = new URL(url);
+    if (!LEGACY_HOSTS.has(parsed.hostname)) return url;
+    parsed.protocol = 'https:';
+    parsed.host = CURRENT_HOST;
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
 
 function stripTrailingSlash(url) {
   return url.replace(/\/+$/, '');
@@ -42,7 +61,7 @@ export function loadConfig() {
   try {
     const config = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
     if (config?.api_base_url) {
-      config.api_base_url = stripTrailingSlash(config.api_base_url);
+      config.api_base_url = stripTrailingSlash(migrateLegacyHost(config.api_base_url));
     }
     return config;
   } catch {
@@ -51,7 +70,7 @@ export function loadConfig() {
 }
 
 export function getApiBaseUrl(config) {
-  return stripTrailingSlash(config?.api_base_url ?? DEFAULT_API_URL);
+  return stripTrailingSlash(migrateLegacyHost(config?.api_base_url ?? DEFAULT_API_URL));
 }
 
 export function loadToken() {

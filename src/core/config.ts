@@ -9,8 +9,27 @@ export interface CollectorConfig {
   app_base_url: string;
 }
 
-const DEFAULT_API_URL = "https://agentboard.kro.kr/api/proxy";
-const DEFAULT_APP_URL = "https://agentboard.kro.kr";
+const DEFAULT_API_URL = "https://agentboard.cloud/api/proxy";
+const DEFAULT_APP_URL = "https://agentboard.cloud";
+
+// agentboard.kro.kr was the original host and no longer serves the API. A saved
+// config always wins over the default, so installs from before the move would
+// keep uploading to a dead host forever — rewrite the host whenever a config is
+// read. Keep in sync with plugin/hooks/lib/config.mjs.
+const LEGACY_HOSTS = new Set(["agentboard.kro.kr", "www.agentboard.kro.kr"]);
+const CURRENT_HOST = "agentboard.cloud";
+
+function migrateLegacyHost(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (!LEGACY_HOSTS.has(parsed.hostname)) return url;
+    parsed.protocol = "https:";
+    parsed.host = CURRENT_HOST;
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
 
 function stripTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
@@ -39,10 +58,10 @@ const DEFAULT_CONFIG: CollectorConfig = {
 
 function normalizeConfig(config: Partial<CollectorConfig>): CollectorConfig {
   const apiBaseUrl = stripTrailingSlash(
-    config.api_base_url ?? getDefaultApiBaseUrl()
+    migrateLegacyHost(config.api_base_url ?? getDefaultApiBaseUrl())
   );
   const appBaseUrl = stripTrailingSlash(
-    config.app_base_url ?? getDefaultAppBaseUrl(apiBaseUrl)
+    migrateLegacyHost(config.app_base_url ?? getDefaultAppBaseUrl(apiBaseUrl))
   );
 
   return {

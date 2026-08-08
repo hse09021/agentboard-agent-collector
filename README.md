@@ -1,6 +1,6 @@
 # AgentBoard — AI Agent Usage Collector
 
-AI 코딩 도구(Claude Code, Codex)의 토큰 사용량을 자동으로 수집하여 [AgentBoard](https://agentboard.kro.kr)로 전송하는 경량 CLI 도구입니다.
+AI 코딩 도구(Claude Code, Codex)의 토큰 사용량을 자동으로 수집하여 [AgentBoard](https://agentboard.cloud)로 전송하는 경량 CLI 도구입니다.
 
 ## 특징
 
@@ -161,7 +161,7 @@ Codex 서브에이전트 종료(SubagentStop) → plugin/hooks/codex/subagent-st
 
 | 변수 | 설명 | 기본값 |
 |------|------|--------|
-| `AGENTBOARD_API_URL` | core-api 프록시 엔드포인트 URL | `https://agentboard.kro.kr/api/proxy` |
+| `AGENTBOARD_API_URL` | core-api 프록시 엔드포인트 URL | `https://agentboard.cloud/api/proxy` |
 | `AGENTBOARD_APP_URL` | OAuth 로그인용 AgentBoard 웹 앱 URL | API URL의 origin에서 유도 |
 | `AGENTBOARD_ENABLE_USAGE_LIMIT_CAPTURE` | `0`으로 설정 시 요금제 스냅샷 수집을 끔 | 활성 |
 

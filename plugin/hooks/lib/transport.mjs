@@ -5,6 +5,8 @@
  * POST /v1/events/usage/batch
  */
 
+import { COLLECTOR_VERSION } from './config.mjs';
+
 const SEND_TIMEOUT_MS = 30_000;
 const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 500;
@@ -44,7 +46,7 @@ export async function uploadEvents(apiBaseUrl, authToken, deviceId, events) {
   const headers = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${authToken}`,
-    'User-Agent': `agentboard-hook/0.4.0`,
+    'User-Agent': `agentboard-hook/${COLLECTOR_VERSION}`,
   };
 
   let lastError = null;
