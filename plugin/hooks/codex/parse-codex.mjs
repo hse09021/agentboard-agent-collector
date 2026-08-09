@@ -10,6 +10,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { addToDayBucket, sortDayBuckets } from '../lib/daily-split.mjs';
 
 function toNN(v) {
   const n = typeof v === 'number' ? v : Number(v);
@@ -124,6 +125,7 @@ export function parseCodexFile(filePath) {
   const lines = raw.split('\n').filter((l) => l.trim());
   if (lines.length === 0) return null;
 
+  let rawInputTokens = 0;
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheReadTokens = 0;
@@ -133,6 +135,10 @@ export function parseCodexFile(filePath) {
   let endedAt;
   let previousTotalUsage = null;
   let lastTokenUsageKey = null;
+  // Per-day buckets so a thread resumed on a later day reports that day's
+  // tokens under that day, not under the thread's creation date.
+  const dayBuckets = new Map();
+  let lastSeenTs;
 
   for (const line of lines) {
     let entry;
@@ -146,6 +152,7 @@ export function parseCodexFile(filePath) {
     if (ts) {
       if (!startedAt || ts < startedAt) startedAt = ts;
       if (!endedAt || ts > endedAt) endedAt = ts;
+      lastSeenTs = ts;
     }
 
     const type = entry.type;
@@ -200,26 +207,44 @@ export function parseCodexFile(filePath) {
     if (totalTokenUsage) previousTotalUsage = totalTokenUsage;
     if (!usage) continue;
 
-    inputTokens += usage.input_tokens;
-    outputTokens += usage.output_tokens;
-    cacheReadTokens += usage.cache_read_tokens;
+    // Codex reports input_tokens INCLUDING the cached part, so the uncached
+    // share is clamped per turn rather than once over the whole session — the
+    // day buckets must sum to the session totals for the delta split to work,
+    // and a per-turn clamp is the stricter, more accurate reading anyway.
+    const uncachedInput = Math.max(0, usage.input_tokens - usage.cache_read_tokens);
+    const turn = {
+      inputTokens: uncachedInput,
+      outputTokens: usage.output_tokens,
+      cacheCreationTokens: 0,
+      cacheReadTokens: usage.cache_read_tokens,
+      totalTokens: uncachedInput + usage.output_tokens + usage.cache_read_tokens,
+    };
+
+    rawInputTokens += usage.input_tokens;
+    inputTokens += turn.inputTokens;
+    outputTokens += turn.outputTokens;
+    cacheReadTokens += turn.cacheReadTokens;
+
+    // An entry without its own timestamp falls back to the last one seen, so it
+    // lands on the day it was actually written rather than being dropped.
+    addToDayBucket(dayBuckets, ts ?? lastSeenTs ?? startedAt ?? new Date().toISOString(), turn);
   }
 
-  const rawTotal = inputTokens + outputTokens + cacheReadTokens;
+  const rawTotal = rawInputTokens + outputTokens + cacheReadTokens;
   if (rawTotal === 0) return null;
 
-  const uncachedInputTokens = Math.max(0, inputTokens - cacheReadTokens);
-  const totalTokens = uncachedInputTokens + outputTokens + cacheReadTokens;
+  const totalTokens = inputTokens + outputTokens + cacheReadTokens;
 
   return {
     sessionId,
     model: model ?? 'codex',
     startedAt: startedAt ?? new Date().toISOString(),
     endedAt: endedAt ?? new Date().toISOString(),
-    inputTokens: uncachedInputTokens,
+    inputTokens,
     outputTokens,
     cacheReadTokens,
     totalTokens,
+    byDate: sortDayBuckets(dayBuckets),
   };
 }
 

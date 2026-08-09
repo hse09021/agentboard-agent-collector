@@ -190,3 +190,61 @@ describe('parseClaudeSession — subagent files', () => {
     expect(result.totalTokens).toBe(420);
   });
 });
+
+describe('parseClaudeSession — per-day buckets', () => {
+  it('files each turn under the day it actually ran on', () => {
+    // The bug: this session was created on 06-01, so every one of its tokens —
+    // including 06-02's — used to be reported with a 06-01 `started_at`.
+    const file = writeTmpJsonl('session.jsonl', [
+      makeAssistant({ timestamp: '2024-06-01T22:00:00.000Z', inputTokens: 100, outputTokens: 10 }),
+      makeAssistant({ timestamp: '2024-06-02T09:00:00.000Z', inputTokens: 200, outputTokens: 20 }),
+      makeAssistant({ timestamp: '2024-06-02T15:00:00.000Z', inputTokens: 300, outputTokens: 30 }),
+    ]);
+
+    const result = parseClaudeSession(file);
+
+    expect(result.byDate.map((b) => b.date)).toEqual(['2024-06-01', '2024-06-02']);
+    expect(result.byDate[0].totalTokens).toBe(110);
+    expect(result.byDate[1].totalTokens).toBe(550);
+    expect(result.byDate[1].startedAt).toBe('2024-06-02T09:00:00.000Z');
+    expect(result.byDate[1].endedAt).toBe('2024-06-02T15:00:00.000Z');
+  });
+
+  it('keeps the day buckets summing to the session totals', () => {
+    const file = writeTmpJsonl('session.jsonl', [
+      makeAssistant({ timestamp: '2024-06-01T10:00:00.000Z', inputTokens: 100, outputTokens: 10, cacheCreation: 5, cacheRead: 7 }),
+      makeAssistant({ timestamp: '2024-06-02T10:00:00.000Z', inputTokens: 200, outputTokens: 20, cacheCreation: 6, cacheRead: 8 }),
+      makeAssistant({ timestamp: '2024-06-03T10:00:00.000Z', inputTokens: 300, outputTokens: 30, cacheCreation: 7, cacheRead: 9 }),
+    ]);
+
+    const result = parseClaudeSession(file);
+    const sum = (field) => result.byDate.reduce((n, b) => n + b[field], 0);
+
+    expect(sum('inputTokens')).toBe(result.inputTokens);
+    expect(sum('outputTokens')).toBe(result.outputTokens);
+    expect(sum('cacheCreationTokens')).toBe(result.cacheCreationTokens);
+    expect(sum('cacheReadTokens')).toBe(result.cacheReadTokens);
+    expect(sum('totalTokens')).toBe(result.totalTokens);
+  });
+
+  it('merges subagent tokens into the day the subagent ran on', () => {
+    const mainFile = writeTmpJsonl('abc123.jsonl', [
+      makeAssistant({ timestamp: '2024-06-01T10:00:00.000Z', inputTokens: 100, outputTokens: 40 }),
+    ]);
+
+    const subagentsDir = join(tmpDir, 'abc123', 'subagents');
+    mkdirSync(subagentsDir, { recursive: true });
+    writeFileSync(
+      join(subagentsDir, 'sub1.jsonl'),
+      JSON.stringify(
+        makeAssistant({ timestamp: '2024-06-02T10:00:00.000Z', inputTokens: 200, outputTokens: 80 })
+      ) + '\n'
+    );
+
+    const result = parseClaudeSession(mainFile);
+
+    expect(result.byDate.map((b) => b.date)).toEqual(['2024-06-01', '2024-06-02']);
+    expect(result.byDate[0].totalTokens).toBe(140);
+    expect(result.byDate[1].totalTokens).toBe(280);
+  });
+});

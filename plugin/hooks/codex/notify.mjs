@@ -25,11 +25,11 @@ import {
   loadToken,
   getSentTotals,
   markTotalsSent,
-  computeDelta,
   acquireSessionLock,
   releaseSessionLock,
   getApiBaseUrl,
 } from '../lib/config.mjs';
+import { splitSessionDelta } from '../lib/daily-split.mjs';
 import { uploadEvents } from '../lib/transport.mjs';
 import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
@@ -143,16 +143,17 @@ async function main() {
   // Codex notify fires per-turn, so `parsed` (when present) holds the
   // session's cumulative totals. Upload only the delta since the last turn
   // we reported; otherwise the same session's later tokens would be dropped
-  // by session-level dedup. If nothing parsed at all, there's no delta to
-  // compute — fall through to the usage-snapshot-only path below.
-  let delta = null;
-  let hasTokens = false;
+  // by session-level dedup. The delta is split per calendar day so a thread
+  // resumed the next day reports that day's tokens under that day. If nothing
+  // parsed at all, there's no delta to compute — fall through to the
+  // usage-snapshot-only path below.
+  let pieces = [];
   if (parsed && parsed.totalTokens > 0) {
     if (parsed.sessionId) sessionId = parsed.sessionId;
     const alreadySent = getSentTotals('codex', sessionId);
-    delta = computeDelta(parsed, alreadySent);
-    hasTokens = delta.totalTokens > 0;
+    pieces = splitSessionDelta(parsed, alreadySent);
   }
+  const hasTokens = pieces.length > 0;
 
   if (!hasTokens && !usageSnapshot) {
     process.exit(0);
@@ -160,28 +161,35 @@ async function main() {
 
   const deviceId = config.device_id;
   const apiBaseUrl = getApiBaseUrl(config);
-  const event = hasTokens
-    ? buildUsageEvent(deviceId, sessionId, parsed, delta)
-    : buildUsageOnlyEvent(deviceId, sessionId);
+  // One event per day, all under the same session id: the server counts
+  // distinct session ids per bucket, so this stays one session per day rather
+  // than becoming several sessions.
+  const events = hasTokens
+    ? pieces.map((piece) => buildUsageEvent(deviceId, sessionId, parsed.model, piece))
+    : [buildUsageOnlyEvent(deviceId, sessionId)];
+  // The snapshot is a point-in-time rate-limit reading, not per-day data —
+  // attach it to the most recent event only.
   if (usageSnapshot) {
-    event.usage_snapshot = {
+    events[events.length - 1].usage_snapshot = {
       ...usageSnapshot,
       raw: sanitizeRawOutput(usageSnapshot.raw),
     };
   }
 
   // Privacy guard — never let a field carrying prompt/code/path/command data
-  // reach the upload call. Runs on the exact object being uploaded, right
+  // reach the upload call. Runs on the exact objects being uploaded, right
   // before the network call (mirrors worker.mjs).
   try {
-    assertNoForbiddenFields(event);
+    for (const event of events) assertNoForbiddenFields(event);
   } catch (err) {
     process.stderr.write(`agentboard-codex: forbidden field detected, upload aborted: ${err.message}\n`);
     process.exit(1);
   }
 
   try {
-    await uploadEvents(apiBaseUrl, token, deviceId, [event]);
+    // One batch, so a partial failure can't advance the ledger past days that
+    // never landed.
+    await uploadEvents(apiBaseUrl, token, deviceId, events);
     if (hasTokens) {
       markTotalsSent('codex', sessionId, parsed);
     }

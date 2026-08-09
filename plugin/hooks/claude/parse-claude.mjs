@@ -7,6 +7,11 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  addToDayBucket,
+  sortDayBuckets,
+  mergeDayBuckets,
+} from '../lib/daily-split.mjs';
 
 function toNN(v) {
   const n = typeof v === 'number' ? v : Number(v);
@@ -40,6 +45,10 @@ function parseSingleFile(filePath) {
   let model;
   let startedAt;
   let endedAt;
+  // Per-day buckets so a session resumed on a later day reports that day's
+  // tokens under that day, not under the session's creation date.
+  const dayBuckets = new Map();
+  let lastSeenTs;
 
   for (const line of lines) {
     let parsed;
@@ -53,6 +62,7 @@ function parseSingleFile(filePath) {
     if (ts) {
       if (!startedAt || ts < startedAt) startedAt = ts;
       if (!endedAt || ts > endedAt) endedAt = ts;
+      lastSeenTs = ts;
     }
 
     if (parsed.type !== 'assistant') continue;
@@ -67,13 +77,35 @@ function parseSingleFile(filePath) {
     const usage = msg.usage;
     if (!usage || typeof usage !== 'object') continue;
 
-    inputTokens += toNN(usage.input_tokens);
-    outputTokens += toNN(usage.output_tokens);
-    cacheCreationTokens += toNN(usage.cache_creation_input_tokens);
-    cacheReadTokens += toNN(usage.cache_read_input_tokens);
+    const turn = {
+      inputTokens: toNN(usage.input_tokens),
+      outputTokens: toNN(usage.output_tokens),
+      cacheCreationTokens: toNN(usage.cache_creation_input_tokens),
+      cacheReadTokens: toNN(usage.cache_read_input_tokens),
+    };
+    turn.totalTokens =
+      turn.inputTokens + turn.outputTokens + turn.cacheCreationTokens + turn.cacheReadTokens;
+
+    inputTokens += turn.inputTokens;
+    outputTokens += turn.outputTokens;
+    cacheCreationTokens += turn.cacheCreationTokens;
+    cacheReadTokens += turn.cacheReadTokens;
+
+    // An entry without its own timestamp falls back to the last one seen, so it
+    // lands on the day it was actually written rather than being dropped.
+    addToDayBucket(dayBuckets, ts ?? lastSeenTs ?? startedAt ?? new Date().toISOString(), turn);
   }
 
-  return { inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, model, startedAt, endedAt };
+  return {
+    inputTokens,
+    outputTokens,
+    cacheCreationTokens,
+    cacheReadTokens,
+    model,
+    startedAt,
+    endedAt,
+    byDate: sortDayBuckets(dayBuckets),
+  };
 }
 
 /**
@@ -101,6 +133,7 @@ export function parseClaudeSession(transcriptPath) {
   let startedAt;
   let endedAt;
   let hasAny = false;
+  let byDate = [];
 
   for (const p of filePaths) {
     const r = parseSingleFile(p);
@@ -113,6 +146,8 @@ export function parseClaudeSession(transcriptPath) {
     if (!model && r.model) model = r.model;
     if (r.startedAt && (!startedAt || r.startedAt < startedAt)) startedAt = r.startedAt;
     if (r.endedAt && (!endedAt || r.endedAt > endedAt)) endedAt = r.endedAt;
+    // A subagent's tokens belong to the day they ran on, same as the parent's.
+    byDate = mergeDayBuckets(byDate, r.byDate);
   }
 
   if (!hasAny) return null;
@@ -129,5 +164,6 @@ export function parseClaudeSession(transcriptPath) {
     model,
     startedAt: startedAt ?? new Date().toISOString(),
     endedAt,
+    byDate,
   };
 }

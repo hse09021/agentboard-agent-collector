@@ -24,9 +24,9 @@ import {
   loadToken,
   getSentTotals,
   markTotalsSent,
-  computeDelta,
   getApiBaseUrl,
 } from '../lib/config.mjs';
+import { splitSessionDelta } from '../lib/daily-split.mjs';
 import { uploadEvents } from '../lib/transport.mjs';
 import { assertNoForbiddenFields } from '../lib/forbidden-data-guard.mjs';
 import { readStdin } from '../lib/read-stdin.mjs';
@@ -82,17 +82,21 @@ async function main() {
   // codex session id.
   const ledgerKey = `sub:${agentId}`;
   const alreadySent = getSentTotals('codex', ledgerKey);
-  const delta = computeDelta(parsed, alreadySent);
-  if (delta.totalTokens <= 0) process.exit(0);
+  // Split per calendar day, from the CHILD rollout's own timestamps — a
+  // long-running subagent that crosses midnight splits like any other session.
+  const pieces = splitSessionDelta(parsed, alreadySent);
+  if (pieces.length === 0) process.exit(0);
 
   const deviceId = config.device_id;
   const apiBaseUrl = getApiBaseUrl(config);
   // Uploaded under the PARENT session id so the subagent's tokens roll into
   // that session rather than spawning a phantom one.
-  const event = buildUsageEvent(deviceId, parentSessionId, parsed, delta);
+  const events = pieces.map((piece) =>
+    buildUsageEvent(deviceId, parentSessionId, parsed.model, piece)
+  );
 
   try {
-    assertNoForbiddenFields(event);
+    for (const event of events) assertNoForbiddenFields(event);
   } catch (err) {
     process.stderr.write(
       `agentboard-codex-subagent: forbidden field detected, upload aborted: ${err.message}\n`
@@ -101,7 +105,7 @@ async function main() {
   }
 
   try {
-    await uploadEvents(apiBaseUrl, token, deviceId, [event]);
+    await uploadEvents(apiBaseUrl, token, deviceId, events);
     markTotalsSent('codex', ledgerKey, parsed);
   } catch (err) {
     process.stderr.write(`agentboard-codex-subagent: upload failed: ${err.message}\n`);

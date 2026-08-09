@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 
-export const COLLECTOR_VERSION = '0.5.0';
+export const COLLECTOR_VERSION = '0.6.0';
 export const DEFAULT_API_URL = process.env.AGENTBOARD_API_URL ?? 'https://agentboard.cloud/api/proxy';
 
 // agentboard.kro.kr was the original host and no longer serves the API. A saved

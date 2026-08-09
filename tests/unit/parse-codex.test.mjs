@@ -291,3 +291,44 @@ describe('parseCodexFile — timestamps', () => {
     expect(result.endedAt).toBe('2024-06-01T10:05:00.000Z');
   });
 });
+
+describe('parseCodexFile — per-day buckets', () => {
+  it('files each turn under the day it actually ran on', () => {
+    // The bug: this thread was created on 06-01, so every one of its tokens —
+    // including 06-02's — used to be reported with a 06-01 `started_at`.
+    const file = writeTmpJsonl('session.jsonl', [
+      sessionMeta(),
+      tokenCountEvent({ input_tokens: 100, output_tokens: 10 }, '2024-06-01T22:00:00.000Z'),
+      tokenCountEvent({ input_tokens: 200, output_tokens: 20 }, '2024-06-02T09:00:00.000Z'),
+      tokenCountEvent({ input_tokens: 300, output_tokens: 30 }, '2024-06-02T15:00:00.000Z'),
+    ]);
+
+    const result = parseCodexFile(file);
+
+    // session_meta is timestamped 06-01 but carries no tokens, so it creates no
+    // bucket of its own.
+    expect(result.byDate.map((b) => b.date)).toEqual(['2024-06-01', '2024-06-02']);
+    expect(result.byDate[0].totalTokens).toBe(110);
+    expect(result.byDate[1].totalTokens).toBe(550);
+    expect(result.byDate[1].startedAt).toBe('2024-06-02T09:00:00.000Z');
+    expect(result.byDate[1].endedAt).toBe('2024-06-02T15:00:00.000Z');
+  });
+
+  it('keeps the day buckets summing to the session totals, cached input included', () => {
+    const file = writeTmpJsonl('session.jsonl', [
+      sessionMeta(),
+      tokenCountEvent({ input_tokens: 1000, output_tokens: 100, cached_input_tokens: 400 }, '2024-06-01T10:00:00.000Z'),
+      tokenCountEvent({ input_tokens: 2000, output_tokens: 200, cached_input_tokens: 900 }, '2024-06-02T10:00:00.000Z'),
+    ]);
+
+    const result = parseCodexFile(file);
+    const sum = (field) => result.byDate.reduce((n, b) => n + b[field], 0);
+
+    expect(sum('inputTokens')).toBe(result.inputTokens);
+    expect(sum('outputTokens')).toBe(result.outputTokens);
+    expect(sum('cacheReadTokens')).toBe(result.cacheReadTokens);
+    expect(sum('totalTokens')).toBe(result.totalTokens);
+    // uncached input is clamped per turn: (1000-400) + (2000-900)
+    expect(result.inputTokens).toBe(1700);
+  });
+});

@@ -29,11 +29,11 @@ import {
   loadToken,
   getSentTotals,
   markTotalsSent,
-  computeDelta,
   acquireSessionLock,
   releaseSessionLock,
   getApiBaseUrl,
 } from '../lib/config.mjs';
+import { splitSessionDelta } from '../lib/daily-split.mjs';
 import { uploadEvents } from '../lib/transport.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
 import { readStdin } from '../lib/read-stdin.mjs';
@@ -83,36 +83,38 @@ async function main() {
   //    Any session with tokens has fired notify at least once, so this never
   //    drops legitimate tokens.
   let parsed = null;
-  let delta = null;
-  let hasTokens = false;
+  let pieces = [];
   if (acquireSessionLock('codex', sessionId)) {
     process.on('exit', () => releaseSessionLock('codex', sessionId));
     const alreadySent = getSentTotals('codex', sessionId);
     if (alreadySent.totalTokens > 0) {
       parsed = parseCodexSession(sessionId);
       if (parsed && parsed.totalTokens > 0) {
-        delta = computeDelta(parsed, alreadySent);
-        hasTokens = delta.totalTokens > 0;
+        // Split per calendar day: residue from a thread that ran past midnight
+        // belongs to the day it accrued on, not to the thread's start date.
+        pieces = splitSessionDelta(parsed, alreadySent);
       }
     }
   }
+  const hasTokens = pieces.length > 0;
 
   if (!hasTokens && !usageSnapshot) process.exit(0);
 
   const deviceId = config.device_id;
   const apiBaseUrl = getApiBaseUrl(config);
-  const event = hasTokens
-    ? buildUsageEvent(deviceId, sessionId, parsed, delta)
-    : buildUsageOnlyEvent(deviceId, sessionId);
+  const events = hasTokens
+    ? pieces.map((piece) => buildUsageEvent(deviceId, sessionId, parsed.model, piece))
+    : [buildUsageOnlyEvent(deviceId, sessionId)];
+  // Point-in-time rate-limit reading — most recent event only.
   if (usageSnapshot) {
-    event.usage_snapshot = {
+    events[events.length - 1].usage_snapshot = {
       ...usageSnapshot,
       raw: sanitizeRawOutput(usageSnapshot.raw),
     };
   }
 
   try {
-    assertNoForbiddenFields(event);
+    for (const event of events) assertNoForbiddenFields(event);
   } catch (err) {
     process.stderr.write(
       `agentboard-codex-sessionend: forbidden field detected, upload aborted: ${err.message}\n`
@@ -121,7 +123,7 @@ async function main() {
   }
 
   try {
-    await uploadEvents(apiBaseUrl, token, deviceId, [event]);
+    await uploadEvents(apiBaseUrl, token, deviceId, events);
     if (hasTokens) markTotalsSent('codex', sessionId, parsed);
   } catch (err) {
     process.stderr.write(`agentboard-codex-sessionend: upload failed: ${err.message}\n`);

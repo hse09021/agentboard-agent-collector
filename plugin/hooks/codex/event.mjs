@@ -9,23 +9,29 @@
 
 import { generateEventId, COLLECTOR_VERSION } from '../lib/config.mjs';
 
-// A codex UsageEvent carrying a token delta. Used for per-turn notify uploads,
-// the SessionEnd residue sweep, and subagent-stop (which passes the parent
-// session id so the subagent's tokens roll into that session).
-export function buildUsageEvent(deviceId, sessionId, parsed, delta) {
+// A codex UsageEvent carrying one calendar day's slice of a token delta. Used
+// for per-turn notify uploads, the SessionEnd residue sweep, and subagent-stop
+// (which passes the parent session id so the subagent's tokens roll into that
+// session).
+//
+// `piece.startedAt` falls inside `piece.date`, which is what makes the server
+// file these tokens under the day they were actually spent rather than under
+// the thread's creation date — a thread started yesterday and resumed today
+// used to report all of today's tokens with yesterday's `started_at`.
+export function buildUsageEvent(deviceId, sessionId, model, piece) {
   return {
     schema_version: '1.0',
     event_id: generateEventId(),
     device_id: deviceId,
     source: 'codex',
-    model: parsed.model,
+    model,
     session_id: sessionId,
-    started_at: parsed.startedAt,
-    ended_at: parsed.endedAt ?? new Date().toISOString(),
-    input_tokens: delta.inputTokens,
-    output_tokens: delta.outputTokens,
-    cache_read_tokens: delta.cacheReadTokens,
-    total_tokens: delta.totalTokens,
+    started_at: piece.startedAt,
+    ended_at: piece.endedAt ?? piece.startedAt,
+    input_tokens: piece.inputTokens,
+    output_tokens: piece.outputTokens,
+    cache_read_tokens: piece.cacheReadTokens,
+    total_tokens: piece.totalTokens,
     collector_version: COLLECTOR_VERSION,
   };
 }

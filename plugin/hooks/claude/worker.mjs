@@ -49,12 +49,12 @@ import {
   generateEventId,
   getSentTotals,
   markTotalsSent,
-  computeDelta,
   acquireSessionLock,
   releaseSessionLock,
   COLLECTOR_VERSION,
   getApiBaseUrl,
 } from '../lib/config.mjs';
+import { splitSessionDelta, sumPieceTokens } from '../lib/daily-split.mjs';
 import { uploadEvents } from '../lib/transport.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
 import { parseClaudeSession } from './parse-claude.mjs';
@@ -81,21 +81,24 @@ function detectSource(payload) {
 
 // ─── UsageEvent builder ───────────────────────────────────────────────────────
 
-function buildUsageEvent(deviceId, source, sessionId, parsed) {
+// One event per calendar day of the delta. `piece.startedAt` falls inside
+// `piece.date`, which is what makes the server file these tokens under the day
+// they were actually spent rather than under the session's creation date.
+function buildUsageEvent(deviceId, source, sessionId, model, piece) {
   return {
     schema_version: '1.0',
     event_id: generateEventId(),
     device_id: deviceId,
     source,
-    model: parsed.model,
+    model,
     session_id: sessionId,
-    started_at: parsed.startedAt,
-    ended_at: parsed.endedAt ?? new Date().toISOString(),
-    input_tokens: parsed.inputTokens,
-    output_tokens: parsed.outputTokens,
-    cache_creation_tokens: parsed.cacheCreationTokens ?? 0,
-    cache_read_tokens: parsed.cacheReadTokens,
-    total_tokens: parsed.totalTokens,
+    started_at: piece.startedAt,
+    ended_at: piece.endedAt ?? piece.startedAt,
+    input_tokens: piece.inputTokens,
+    output_tokens: piece.outputTokens,
+    cache_creation_tokens: piece.cacheCreationTokens ?? 0,
+    cache_read_tokens: piece.cacheReadTokens,
+    total_tokens: piece.totalTokens,
     collector_version: COLLECTOR_VERSION,
   };
 }
@@ -209,15 +212,20 @@ async function main() {
   workerLog(`parsed totalTokens=${parsed?.totalTokens ?? 'null'}`);
 
   // 5. Reduce the cumulative session totals to only what is new since the last
-  // upload. `parsed` is kept as the cumulative figure to persist afterwards.
+  // upload, split across the calendar days that new usage happened on. A
+  // session created yesterday and resumed today yields a piece dated today, so
+  // today's tokens are no longer filed under the session's creation date.
+  // `cumulative` is kept as the figure to persist afterwards.
   const cumulative = parsed;
+  let pieces = [];
   if (parsed) {
     const alreadySent = getSentTotals(source, sessionId);
-    const delta = computeDelta(parsed, alreadySent);
+    pieces = splitSessionDelta(parsed, alreadySent);
     workerLog(
-      `delta totalTokens=${delta.totalTokens} (cumulative=${parsed.totalTokens}, alreadySent=${alreadySent.totalTokens})`
+      `delta totalTokens=${sumPieceTokens(pieces)} across ${pieces.length} day(s) ` +
+        `[${pieces.map((p) => `${p.date}:${p.totalTokens}`).join(' ')}] ` +
+        `(cumulative=${parsed.totalTokens}, alreadySent=${alreadySent.totalTokens})`
     );
-    parsed = { ...parsed, ...delta };
   }
 
   // 5.5 Best-effort usage-limit snapshot (`/usage`), fully independent of token
@@ -241,38 +249,48 @@ async function main() {
     }
   }
 
-  const hasTokens = !!parsed && parsed.totalTokens > 0;
+  const hasTokens = pieces.length > 0;
   if (!hasTokens && !usageSnapshot) {
     workerLog(`SKIP: no tokens and no usage snapshot (parsed=${parsed ? 'non-null' : 'null'})`);
     process.exit(0);
   }
 
-  // 6. Build event
-  const event = hasTokens
-    ? buildUsageEvent(deviceId, source, sessionId, parsed)
-    : buildUsageOnlyEvent(deviceId, source, sessionId);
+  // 6. Build one event per day, all under the same session id. The server
+  // counts distinct session ids per bucket, so a session spanning two days
+  // shows up as one session on each of them rather than as two sessions.
+  const events = hasTokens
+    ? pieces.map((piece) =>
+        buildUsageEvent(deviceId, source, sessionId, cumulative.model, piece)
+      )
+    : [buildUsageOnlyEvent(deviceId, source, sessionId)];
+
+  // The snapshot is a point-in-time reading of the account's rate limits, not
+  // per-day data — attach it to the most recent event only, never to each.
   if (usageSnapshot) {
-    event.usage_snapshot = {
+    events[events.length - 1].usage_snapshot = {
       ...usageSnapshot,
       raw: sanitizeRawOutput(usageSnapshot.raw),
     };
   }
 
   // 6.5 Privacy guard — never let a field carrying prompt/code/path/command
-  // data reach the upload call. This must run on the exact object being
+  // data reach the upload call. This must run on the exact objects being
   // uploaded, right before the network call.
   try {
-    assertNoForbiddenFields(event);
+    for (const event of events) assertNoForbiddenFields(event);
   } catch (err) {
     workerLog(`BLOCKED: forbidden field detected, upload aborted: ${err.message}`);
     process.stderr.write(`agentboard-worker: forbidden field detected, upload aborted: ${err.message}\n`);
     process.exit(1);
   }
 
-  // 7. Send to API
+  // 7. Send to API — one batch, so a partial failure can't advance the ledger
+  // past days that never landed.
   try {
-    workerLog(`uploading event_id=${event.event_id} total_tokens=${event.total_tokens}`);
-    await uploadEvents(apiBaseUrl, token, deviceId, [event]);
+    workerLog(
+      `uploading ${events.length} event(s) total_tokens=${events.reduce((n, e) => n + e.total_tokens, 0)}`
+    );
+    await uploadEvents(apiBaseUrl, token, deviceId, events);
     workerLog('upload success');
   } catch (err) {
     workerLog(`ERROR: upload failed: ${err.message}`);

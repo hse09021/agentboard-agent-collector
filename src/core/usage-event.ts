@@ -1,4 +1,4 @@
-export const COLLECTOR_VERSION = "0.5.0";
+export const COLLECTOR_VERSION = "0.6.0";
 
 // Sources this collector actively collects from. Hook registration, session
 // parsing and CLI output are all scoped to these.
