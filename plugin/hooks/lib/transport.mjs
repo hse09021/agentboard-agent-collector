@@ -79,14 +79,20 @@ export async function uploadEvents(apiBaseUrl, authToken, deviceId, events) {
 
       // A 2xx alone does not mean every event landed — the server reports
       // per-event rejections inside the body of a 200.
-      let body = null;
+      //
+      // Named `responseBody`, not `body`: the request payload above is already
+      // called `body` in this scope, and a second `let body` here puts the
+      // outer one in the temporal dead zone for the whole block — including the
+      // fetch() call that reads it. That shipped in 0.7.0 and broke every
+      // upload with "Cannot access 'body' before initialization".
+      let responseBody = null;
       try {
-        body = await response.json();
+        responseBody = await response.json();
       } catch {
         // Older servers, or a proxy that rewrote the body. classify() treats
         // an unreadable body as full success, preserving prior behaviour.
       }
-      return classifyUploadResponse(body, events.length);
+      return classifyUploadResponse(responseBody, events.length);
     } catch (err) {
       lastError = err;
       if (attempt < MAX_ATTEMPTS - 1 && isRetriableError(err)) {
