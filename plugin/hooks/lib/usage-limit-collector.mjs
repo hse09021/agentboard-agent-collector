@@ -32,9 +32,33 @@ import { execFileSync, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { cliSupportsFlag } from './cli-capabilities.mjs';
 
-export function claudeUsageCommand() {
-  return { command: 'claude', args: ['-p', '/usage'] };
+// `claude -p /usage` normally writes a transcript under
+// ~/.claude/projects/**/*.jsonl, and those show up in the /resume session
+// picker. A user who runs the collector for a few days ends up with a list
+// dominated by "/usage" entries and cannot find their own sessions — measured
+// 17 ghosts against 3 real sessions on one dev machine.
+//
+// --no-session-persistence suppresses the transcript entirely. Verified
+// 2026-09-06 against Claude Code: /usage still prints the full limits report
+// and the .jsonl count does not move. It only works with --print, which we
+// already pass.
+//
+// The flag does not exist in older releases and an unknown flag fails the whole
+// invocation, so it is probed once (via --help, which creates no session) and
+// cached.
+export const NO_SESSION_PERSISTENCE_FLAG = '--no-session-persistence';
+
+export function claudeUsageCommand(opts = {}) {
+  const supportsFlag =
+    opts.supportsNoSessionPersistence ??
+    cliSupportsFlag('claude', NO_SESSION_PERSISTENCE_FLAG);
+
+  const args = ['-p', '/usage'];
+  if (supportsFlag) args.push(NO_SESSION_PERSISTENCE_FLAG);
+
+  return { command: 'claude', args, suppressesTranscript: supportsFlag };
 }
 
 function normalizeClaudePlanName(value) {

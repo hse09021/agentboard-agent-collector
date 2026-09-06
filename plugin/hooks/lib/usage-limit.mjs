@@ -70,7 +70,11 @@ function isCaptureEnabled() {
 
 /**
  * @param {'claude_code'|'codex'} source
- * @param {{minIntervalMs?: number, timeoutMs?: number}} [opts]
+ * @param {{minIntervalMs?: number, timeoutMs?: number, route?: string}} [opts]
+ *        `route` scopes the throttle. A snapshot is only ever attached to an
+ *        upload going to that route, so each destination needs its own cadence —
+ *        otherwise a developer alternating between two projects leaves one
+ *        server without a reading for a long stretch.
  * @returns {Promise<null | {
  *   raw: string, parseOk: boolean, capturedAt: string,
  *   planName?: string, fiveHourRemainingPct?: number, weeklyRemainingPct?: number,
@@ -83,12 +87,13 @@ export async function captureUsageLimitSnapshot(source, opts = {}) {
 
     const capture = SOURCE_CAPTURERS[source];
     if (!capture) return null;
-    if (!shouldCaptureUsageLimit(source, { minIntervalMs: opts.minIntervalMs })) return null;
+    if (!shouldCaptureUsageLimit(source, { minIntervalMs: opts.minIntervalMs, route: opts.route }))
+      return null;
 
     const parsed = await capture(opts);
 
     // Mark captured regardless of success — a failing CLI shouldn't be retried every session.
-    markUsageLimitCaptured(source);
+    markUsageLimitCaptured(source, { route: opts.route });
 
     if (!parsed) return null;
 

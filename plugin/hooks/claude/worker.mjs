@@ -44,18 +44,19 @@ function workerLog(msg) {
 const WORKER_MAX_LIFETIME_MS = 60_000;
 
 import {
-  loadConfig,
-  loadToken,
+  loadConfigV2,
+  loadRouteCredential,
+  getSentRoute,
   generateEventId,
   getSentTotals,
   markTotalsSent,
   acquireSessionLock,
   releaseSessionLock,
   COLLECTOR_VERSION,
-  getApiBaseUrl,
 } from '../lib/config.mjs';
+import { resolveRoute } from '../lib/routing.mjs';
 import { splitSessionDelta, sumPieceTokens } from '../lib/daily-split.mjs';
-import { uploadEvents } from '../lib/transport.mjs';
+import { uploadEvents, registerDevice } from '../lib/transport.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
 import { parseClaudeSession } from './parse-claude.mjs';
 import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
@@ -121,6 +122,13 @@ function buildUsageOnlyEvent(deviceId, source, sessionId) {
   };
 }
 
+function detectOs() {
+  if (process.platform === 'win32') return 'windows';
+  if (process.platform === 'darwin') return 'macos';
+  if (process.platform === 'linux') return 'linux';
+  return 'unknown';
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -160,17 +168,12 @@ async function main() {
   }
   try { unlinkSync(payloadFile); } catch { /* best-effort */ }
 
-  // 2. Load agentboard config
-  const config = loadConfig();
-  const token = loadToken();
-
-  if (!config || !token) {
-    workerLog('SKIP: not logged in (no config or token)');
+  // 2. Load agentboard config (v1 files are promoted in memory)
+  const config = loadConfigV2();
+  if (!config) {
+    workerLog('SKIP: no config');
     process.exit(0);
   }
-
-  const deviceId = config.device_id;
-  const apiBaseUrl = getApiBaseUrl(config);
 
   // 3. Detect source
   const detected = detectSource(payload);
@@ -181,6 +184,38 @@ async function main() {
 
   const { source, sessionId, transcriptPath } = detected;
   workerLog(`source=${source} sessionId=${sessionId} transcriptPath=${transcriptPath}`);
+
+  // 3.2 Resolve which server this session's data belongs to.
+  //
+  // Done before the rate-limit capture because the capture is throttled per
+  // route: a snapshot taken while working in one project must not be attached
+  // to an upload going to a different organization's server.
+  //
+  // `cwd` comes from the hook payload only — never process.cwd(), which is
+  // whatever the AI tool happened to launch us with and would misroute. It is
+  // read here and never uploaded.
+  const pinnedRoute = getSentRoute(source, sessionId);
+  const route = resolveRoute({ config, cwd: payload.cwd, pinnedRouteId: pinnedRoute });
+
+  if (route.kind === 'blocked') {
+    // The pinned route's binding is gone. Silently falling back to another
+    // server would ship this organization's telemetry somewhere it was never
+    // meant to go; the tokens stay in the ledger and are recovered if the
+    // binding is restored.
+    workerLog(`SKIP: session pinned to a route that no longer exists (${pinnedRoute})`);
+    process.exit(0);
+  }
+
+  const apiBaseUrl = route.server.api_base_url;
+  const deviceId = route.server.device_id ?? config.device_id;
+  const token = loadRouteCredential(route.credentialRef);
+
+  if (!token || !deviceId) {
+    workerLog(`SKIP: no credential for route=${route.routeId} (not logged in / not connected)`);
+    process.exit(0);
+  }
+
+  workerLog(`route=${route.routeId} api=${apiBaseUrl} pinned=${pinnedRoute ?? 'none'}`);
 
   // 3.5 One in-flight upload per session. Must be taken before reading the
   // sent-totals ledger: a concurrent worker that read the same totals would
@@ -240,7 +275,7 @@ async function main() {
       const forceCapture = payload.hook_event_name === 'SessionEnd';
       usageSnapshot = await captureUsageLimitSnapshot(
         source,
-        forceCapture ? { minIntervalMs: 0 } : {}
+        forceCapture ? { minIntervalMs: 0, route: route.routeId } : { route: route.routeId }
       );
       workerLog(`usageSnapshot=${usageSnapshot ? 'captured' : 'none'} force=${forceCapture}`);
     } catch (err) {
@@ -286,24 +321,74 @@ async function main() {
 
   // 7. Send to API — one batch, so a partial failure can't advance the ledger
   // past days that never landed.
+  let verdict;
   try {
     workerLog(
       `uploading ${events.length} event(s) total_tokens=${events.reduce((n, e) => n + e.total_tokens, 0)}`
     );
-    await uploadEvents(apiBaseUrl, token, deviceId, events);
-    workerLog('upload success');
+    verdict = await uploadEvents(apiBaseUrl, token, deviceId, events);
   } catch (err) {
-    workerLog(`ERROR: upload failed: ${err.message}`);
-    process.stderr.write(`agentboard-worker: upload failed: ${err.message}\n`);
+    // A wiped or reinstalled server no longer knows this device. Nothing else
+    // re-registers from the hook path, so without this every developer goes
+    // silently dark until someone happens to run `agentboard login`.
+    const deviceGone = /HTTP 404/.test(err.message) && /device_not_found/.test(err.message);
+    if (!deviceGone) {
+      workerLog(`ERROR: upload failed: ${err.message}`);
+      process.stderr.write(`agentboard-worker: upload failed: ${err.message}\n`);
+      process.exit(1);
+    }
+
+    workerLog('device_not_found — attempting re-registration');
+    const reregistered = await registerDevice(apiBaseUrl, token, deviceId, { os: detectOs() });
+    if (!reregistered) {
+      workerLog('ERROR: re-registration failed');
+      process.exit(1);
+    }
+    try {
+      verdict = await uploadEvents(apiBaseUrl, token, deviceId, events);
+      workerLog('upload success after re-registration');
+    } catch (retryErr) {
+      workerLog(`ERROR: upload failed after re-registration: ${retryErr.message}`);
+      process.exit(1);
+    }
+  }
+
+  if (verdict && verdict.parsed) {
+    workerLog(
+      `server verdict accepted=${verdict.accepted} duplicates=${verdict.duplicates} ` +
+        `rejected=${verdict.rejected} reasons=${JSON.stringify(verdict.reasons)}`
+    );
+  }
+
+  // A 2xx is not proof that the events landed — the server reports per-event
+  // rejections inside the body of a 200. Advancing the ledger past an event the
+  // server could still accept on a retry loses those tokens permanently,
+  // because deltas are computed against the ledger.
+  if (verdict && !verdict.canAdvanceLedger) {
+    workerLog('HOLD: server rejected events retriably — ledger not advanced');
+    process.stderr.write('agentboard: server rejected this upload; it will be retried.\n');
     process.exit(1);
+  }
+
+  // Permanent rejections are given up on, but never silently: a whole batch
+  // rejected outright almost always means a version mismatch with the server,
+  // and stderr is the only channel the user actually sees.
+  if (verdict && verdict.allRejected) {
+    process.stderr.write(
+      `agentboard: the server rejected every event in this upload ` +
+        `(${JSON.stringify(verdict.reasons)}). Run \`agentboard doctor\` for details.\n`
+    );
   }
 
   // 8. Record the cumulative totals now uploaded, so the next invocation for
   // this session only sends what accrues after this point. Skipped when the
   // session had no tokens at all (usage-snapshot-only upload) — writing zeroed
   // totals there would discard what a previous invocation had already recorded.
+  //
+  // The route is pinned here, on the first successful upload: from now on this
+  // session goes to this server no matter where the user cd's to.
   if (cumulative) {
-    markTotalsSent(source, sessionId, cumulative);
+    markTotalsSent(source, sessionId, cumulative, route.routeId);
   }
   workerLog('done');
   process.exit(0);

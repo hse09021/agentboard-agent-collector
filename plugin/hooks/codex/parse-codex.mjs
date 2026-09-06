@@ -131,6 +131,10 @@ export function parseCodexFile(filePath) {
   let cacheReadTokens = 0;
   let model;
   let sessionId;
+  // Routing anchor. Codex's per-turn `notify` payload carries only
+  // {thread-id, status}, so the working directory has to come from the rollout
+  // file. Read here and used only to pick a destination server — never uploaded.
+  let cwd;
   let startedAt;
   let endedAt;
   let previousTotalUsage = null;
@@ -162,6 +166,9 @@ export function parseCodexFile(filePath) {
     if (type === 'session_meta' || type === 'turn_context') {
       if (type === 'session_meta' && payload.id && !sessionId) {
         sessionId = String(payload.id);
+      }
+      if (type === 'session_meta' && payload.cwd && !cwd) {
+        cwd = String(payload.cwd);
       }
       if (payload.model && !model) model = String(payload.model);
       continue;
@@ -237,6 +244,7 @@ export function parseCodexFile(filePath) {
 
   return {
     sessionId,
+    cwd,
     model: model ?? 'codex',
     startedAt: startedAt ?? new Date().toISOString(),
     endedAt: endedAt ?? new Date().toISOString(),

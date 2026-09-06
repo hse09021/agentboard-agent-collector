@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { generateDeviceId } from "./device-id";
+import { writeJsonAtomic } from "./atomic-write";
 
 export interface CollectorConfig {
   device_id?: string;
@@ -72,6 +73,12 @@ function normalizeConfig(config: Partial<CollectorConfig>): CollectorConfig {
 }
 
 export function getConfigDir(): string {
+  // Test/CI override. Without it the only way to redirect the config dir is to
+  // stub HOME/APPDATA process-wide, which makes it impossible to test anything
+  // that also touches ~/.claude or ~/.codex (install-hooks, ghost cleanup).
+  if (process.env.AGENTBOARD_CONFIG_DIR) {
+    return process.env.AGENTBOARD_CONFIG_DIR;
+  }
   if (process.platform === "win32") {
     const appData =
       process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming");
@@ -117,10 +124,7 @@ export function saveConfig(config: Partial<CollectorConfig>): void {
   ensureConfigDir();
   const existing = loadConfig();
   const merged = { ...existing, ...config };
-  fs.writeFileSync(getConfigPath(), JSON.stringify(merged, null, 2), {
-    encoding: "utf-8",
-    mode: 0o600,
-  });
+  writeJsonAtomic(getConfigPath(), merged);
 }
 
 export function getOrCreateDeviceId(): string {

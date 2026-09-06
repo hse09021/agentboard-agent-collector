@@ -6,6 +6,7 @@
  */
 
 import { COLLECTOR_VERSION } from './config.mjs';
+import { classifyUploadResponse } from './upload-result.mjs';
 
 const SEND_TIMEOUT_MS = 30_000;
 const MAX_ATTEMPTS = 2;
@@ -33,13 +34,19 @@ function isRetriableError(err) {
 /**
  * Upload a batch of UsageEvents to the agentboard API.
  *
+ * Returns the server's per-event verdict (see upload-result.mjs). The caller
+ * MUST honour `canAdvanceLedger`: advancing the cumulative-totals ledger past
+ * events the server refused for a retriable reason loses them permanently,
+ * because deltas are computed against that ledger.
+ *
  * @param {string} apiBaseUrl
  * @param {string} authToken
  * @param {string} deviceId
  * @param {object[]} events - UsageEvent array
+ * @returns {Promise<ReturnType<typeof classifyUploadResponse>>}
  */
 export async function uploadEvents(apiBaseUrl, authToken, deviceId, events) {
-  if (!events || events.length === 0) return;
+  if (!events || events.length === 0) return classifyUploadResponse(null, 0);
 
   const url = `${apiBaseUrl}/v1/events/usage/batch`;
   const body = JSON.stringify({ device_id: deviceId, events });
@@ -70,7 +77,16 @@ export async function uploadEvents(apiBaseUrl, authToken, deviceId, events) {
         throw new Error(`HTTP ${response.status}: ${text}`);
       }
 
-      return;
+      // A 2xx alone does not mean every event landed — the server reports
+      // per-event rejections inside the body of a 200.
+      let body = null;
+      try {
+        body = await response.json();
+      } catch {
+        // Older servers, or a proxy that rewrote the body. classify() treats
+        // an unreadable body as full success, preserving prior behaviour.
+      }
+      return classifyUploadResponse(body, events.length);
     } catch (err) {
       lastError = err;
       if (attempt < MAX_ATTEMPTS - 1 && isRetriableError(err)) {
@@ -82,4 +98,44 @@ export async function uploadEvents(apiBaseUrl, authToken, deviceId, events) {
   }
 
   throw lastError ?? new Error('uploadEvents: exhausted retries');
+}
+
+
+/**
+ * Re-registers this device with a server.
+ *
+ * The hook path needs this because `device_not_found` (404) is otherwise fatal
+ * and permanent: the CLI only registers during `login`/`connect`, so a
+ * self-hosted server that was reinstalled or had its database reset would drop
+ * every upload from every developer with no visible cause.
+ *
+ * Never throws — the caller treats failure as "could not recover this time".
+ *
+ * @param {string} apiBaseUrl
+ * @param {string} authToken
+ * @param {string} deviceId
+ * @param {{os?: string, name?: string}} [meta]
+ * @returns {Promise<boolean>} whether the device is registered now
+ */
+export async function registerDevice(apiBaseUrl, authToken, deviceId, meta = {}) {
+  try {
+    const response = await fetch(`${apiBaseUrl}/v1/collector/devices`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authToken}`,
+        'User-Agent': `agentboard-hook/${COLLECTOR_VERSION}`,
+      },
+      body: JSON.stringify({
+        device_id: deviceId,
+        collector_version: COLLECTOR_VERSION,
+        ...(meta.os ? { os: meta.os } : {}),
+        ...(meta.name ? { name: meta.name } : {}),
+      }),
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
 }

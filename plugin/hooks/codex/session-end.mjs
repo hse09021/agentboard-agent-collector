@@ -25,16 +25,15 @@ import { parseCodexSession } from './parse-codex.mjs';
 import { buildUsageEvent, buildUsageOnlyEvent } from './event.mjs';
 import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
 import {
-  loadConfig,
-  loadToken,
+  loadConfigV2,
   getSentTotals,
   markTotalsSent,
   acquireSessionLock,
   releaseSessionLock,
-  getApiBaseUrl,
 } from '../lib/config.mjs';
 import { splitSessionDelta } from '../lib/daily-split.mjs';
 import { uploadEvents } from '../lib/transport.mjs';
+import { resolveUploadContext } from '../lib/upload-context.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
 import { readStdin } from '../lib/read-stdin.mjs';
 
@@ -58,15 +57,26 @@ async function main() {
   const sessionId = payload.session_id ?? payload.sessionId;
   if (!sessionId) process.exit(0);
 
-  const config = loadConfig();
-  const token = loadToken();
-  if (!config || !token) process.exit(0);
+  // The route (and therefore the credential) depends on the working directory,
+  // which the hook payload carries. Resolved here so every later step uses the
+  // right server.
+  const ctx = resolveUploadContext({
+    source: 'codex',
+    sessionId: sessionId,
+    cwd: payload.cwd,
+  });
+  if (!ctx.ok) {
+    process.stderr.write(`agentboard-codex-sessionend: ${ctx.reason}\n`);
+    process.exit(0);
+  }
+  const { apiBaseUrl, deviceId, token, route } = ctx;
 
   // 1. Force a rate-limit snapshot (throttle bypassed for the end-of-session
   //    resting value). Reads codex app-server's rate limits — a metadata RPC,
   //    not a billable turn, and it does not fire codex hooks, so no recursion.
   const usageSnapshot = await captureUsageLimitSnapshot('codex', {
     minIntervalMs: 0,
+    route: route.routeId,
   }).catch(() => null);
 
   // 2. Guarded parent-session token residue sweep, under the SAME per-session
@@ -100,8 +110,6 @@ async function main() {
 
   if (!hasTokens && !usageSnapshot) process.exit(0);
 
-  const deviceId = config.device_id;
-  const apiBaseUrl = getApiBaseUrl(config);
   const events = hasTokens
     ? pieces.map((piece) => buildUsageEvent(deviceId, sessionId, parsed.model, piece))
     : [buildUsageOnlyEvent(deviceId, sessionId)];
@@ -123,8 +131,16 @@ async function main() {
   }
 
   try {
-    await uploadEvents(apiBaseUrl, token, deviceId, events);
-    if (hasTokens) markTotalsSent('codex', sessionId, parsed);
+    const verdict = await uploadEvents(apiBaseUrl, token, deviceId, events);
+
+    // A 2xx does not mean every event landed — the server reports per-event
+    // rejections inside the body. Advancing the ledger past something the
+    // server might still accept loses those tokens for good.
+    if (verdict && !verdict.canAdvanceLedger) {
+      process.stderr.write('agentboard: server rejected this upload; it will be retried.\n');
+      process.exit(1);
+    }
+    if (hasTokens) markTotalsSent('codex', sessionId, parsed, route.routeId);
   } catch (err) {
     process.stderr.write(`agentboard-codex-sessionend: upload failed: ${err.message}\n`);
     process.exit(1);

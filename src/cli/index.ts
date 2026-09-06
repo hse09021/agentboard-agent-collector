@@ -28,6 +28,25 @@ program
   });
 
 program
+  .command("connect")
+  .argument("[dir]", "Project directory to connect (defaults to the current one)", ".")
+  .description("Connect a project directory to an organization server")
+  .option("-y, --yes", "Skip the confirmation prompt")
+  .action(async (dir, options) => {
+    const { connectCommand } = await import("./commands/connect");
+    await connectCommand(dir, options);
+  });
+
+program
+  .command("disconnect")
+  .argument("[dir]", "Project directory to disconnect (defaults to the current one)", ".")
+  .description("Stop sending a project directory to its organization server")
+  .action(async (dir) => {
+    const { disconnectCommand } = await import("./commands/connect");
+    await disconnectCommand(dir);
+  });
+
+program
   .command("status")
   .description("Show collector status and token usage stats")
   .action(async () => {
@@ -38,9 +57,13 @@ program
 program
   .command("doctor")
   .description("Diagnose local configuration and environment")
-  .action(async () => {
+  .option(
+    "--clean-sessions",
+    "Remove leftover /usage transcripts created by collector versions before 0.7.0"
+  )
+  .action(async (options) => {
     const { doctorCommand } = await import("./commands/doctor");
-    await doctorCommand();
+    await doctorCommand(options);
   });
 
 program

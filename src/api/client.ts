@@ -1,11 +1,10 @@
 import {
   RegisterDeviceRequest,
   RegisterDeviceResponse,
-  BatchUploadResponse,
   UsageSummary,
   UsageBySource,
 } from "./types";
-import { UsageEvent, COLLECTOR_VERSION } from "../core/usage-event";
+import { COLLECTOR_VERSION } from "../core/usage-event";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -40,7 +39,7 @@ export class ApiClient {
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      throw new ApiError(response.status, text);
+      throw new ApiError(response.status, text, extractErrorCode(text));
     }
 
     return response.json() as Promise<T>;
@@ -56,15 +55,6 @@ export class ApiClient {
     );
   }
 
-  async uploadBatch(
-    deviceId: string,
-    events: UsageEvent[]
-  ): Promise<BatchUploadResponse> {
-    return this.request<BatchUploadResponse>("POST", "/v1/events/usage/batch", {
-      device_id: deviceId,
-      events,
-    });
-  }
 
   async checkHealth(): Promise<boolean> {
     try {
@@ -93,10 +83,29 @@ export class ApiClient {
   }
 }
 
+/**
+ * Pulls the machine-readable `code` out of a server error body.
+ *
+ * The server has emitted these since the first release (`device_not_found`,
+ * `revoked_device`) but nothing ever read them, so a wiped server database
+ * looked exactly like a network failure. Returns undefined for non-JSON or
+ * code-less bodies, which is the normal case for 4xx from the web proxy.
+ */
+export function extractErrorCode(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as { code?: unknown };
+    return typeof parsed.code === "string" ? parsed.code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
-    public readonly body: string
+    public readonly body: string,
+    /** Server-supplied error code, e.g. "device_not_found". */
+    public readonly code?: string
   ) {
     super(`HTTP ${status}: ${body}`);
     this.name = "ApiError";

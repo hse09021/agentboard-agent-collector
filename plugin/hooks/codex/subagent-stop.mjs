@@ -20,14 +20,13 @@
 import { parseCodexFile } from './parse-codex.mjs';
 import { buildUsageEvent } from './event.mjs';
 import {
-  loadConfig,
-  loadToken,
+  loadConfigV2,
   getSentTotals,
   markTotalsSent,
-  getApiBaseUrl,
 } from '../lib/config.mjs';
 import { splitSessionDelta } from '../lib/daily-split.mjs';
 import { uploadEvents } from '../lib/transport.mjs';
+import { resolveUploadContext } from '../lib/upload-context.mjs';
 import { assertNoForbiddenFields } from '../lib/forbidden-data-guard.mjs';
 import { readStdin } from '../lib/read-stdin.mjs';
 
@@ -61,9 +60,19 @@ async function main() {
     payload.agent_transcript_path ?? payload.agentTranscriptPath;
   if (!parentSessionId || !agentId || !transcriptPath) process.exit(0);
 
-  const config = loadConfig();
-  const token = loadToken();
-  if (!config || !token) process.exit(0);
+  // The route (and therefore the credential) depends on the working directory,
+  // which the hook payload carries. Resolved here so every later step uses the
+  // right server.
+  const ctx = resolveUploadContext({
+    source: 'codex',
+    sessionId: parentSessionId,
+    cwd: payload.cwd,
+  });
+  if (!ctx.ok) {
+    process.stderr.write(`agentboard-codex-subagent: ${ctx.reason}\n`);
+    process.exit(0);
+  }
+  const { apiBaseUrl, deviceId, token, route } = ctx;
 
   // The child rollout may still be flushing when the hook fires — retry like
   // notify.mjs does for the parent session file.
@@ -87,8 +96,6 @@ async function main() {
   const pieces = splitSessionDelta(parsed, alreadySent);
   if (pieces.length === 0) process.exit(0);
 
-  const deviceId = config.device_id;
-  const apiBaseUrl = getApiBaseUrl(config);
   // Uploaded under the PARENT session id so the subagent's tokens roll into
   // that session rather than spawning a phantom one.
   const events = pieces.map((piece) =>
@@ -105,8 +112,16 @@ async function main() {
   }
 
   try {
-    await uploadEvents(apiBaseUrl, token, deviceId, events);
-    markTotalsSent('codex', ledgerKey, parsed);
+    const verdict = await uploadEvents(apiBaseUrl, token, deviceId, events);
+
+    // A 2xx does not mean every event landed — the server reports per-event
+    // rejections inside the body. Advancing the ledger past something the
+    // server might still accept loses those tokens for good.
+    if (verdict && !verdict.canAdvanceLedger) {
+      process.stderr.write('agentboard: server rejected this upload; it will be retried.\n');
+      process.exit(1);
+    }
+    markTotalsSent('codex', ledgerKey, parsed, route.routeId);
   } catch (err) {
     process.stderr.write(`agentboard-codex-subagent: upload failed: ${err.message}\n`);
     process.exit(1);

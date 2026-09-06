@@ -9,15 +9,23 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  writeFileSync,
   rmdirSync,
   statSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { writeJsonAtomic } from './atomic-write.mjs';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 
-export const COLLECTOR_VERSION = '0.6.0';
+// Re-exported so hook modules keep importing the version from here.
+// The value itself is generated from package.json by scripts/generate-version.mjs
+// (run by `npm run build`) — it used to be hand-copied into three files and drifted.
+export { COLLECTOR_VERSION } from './version.mjs';
+
+// Wire-format version of the UsageEvent payload. The server pins this exactly,
+// so it must not be bumped without a coordinated server change.
+// Keep in sync with src/core/usage-event.ts.
+export const SCHEMA_VERSION = '1.0';
 export const DEFAULT_API_URL = process.env.AGENTBOARD_API_URL ?? 'https://agentboard.cloud/api/proxy';
 
 // agentboard.kro.kr was the original host and no longer serves the API. A saved
@@ -44,6 +52,12 @@ function stripTrailingSlash(url) {
 }
 
 function getConfigDir() {
+  // Test/CI override — mirror of src/core/config.ts. Lets a test point the
+  // whole config dir somewhere disposable without stubbing HOME/APPDATA
+  // process-wide (which would also move ~/.claude and ~/.codex).
+  if (process.env.AGENTBOARD_CONFIG_DIR) {
+    return process.env.AGENTBOARD_CONFIG_DIR;
+  }
   if (process.platform === 'win32') {
     const appData = process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming');
     return join(appData, 'agentboard');
@@ -64,6 +78,81 @@ export function loadConfig() {
       config.api_base_url = stripTrailingSlash(migrateLegacyHost(config.api_base_url));
     }
     return config;
+  } catch {
+    return null;
+  }
+}
+
+const DEFAULT_ROUTE_ID = 'default';
+
+/**
+ * Loads config.json and promotes a v1 (single-server) file to the v2 shape in
+ * memory. Mirror of migrateV1toV2 in src/core/config-schema.ts — the two must
+ * agree, because the hook and the CLI promote independently.
+ *
+ * Hooks never write config.json, so promoting in memory is safe: the CLI
+ * persists the upgrade the next time it runs.
+ */
+export function loadConfigV2() {
+  const raw = loadConfig();
+
+  if (raw && raw.version === 2) {
+    return {
+      ...raw,
+      default_server: normalizeServerRef(raw.default_server),
+      bindings: (raw.bindings ?? []).map((b) => ({ ...b, server: normalizeServerRef(b.server) })),
+      snapshot_target: raw.snapshot_target ?? 'routed',
+    };
+  }
+
+  // A saved v1 URL is carried over verbatim. Falling back to the environment
+  // here would redirect a self-hosted user to the SaaS default, because hooks
+  // do not inherit the user's shell.
+  const apiBaseUrl = stripTrailingSlash(migrateLegacyHost(raw?.api_base_url ?? DEFAULT_API_URL));
+  let appBaseUrl = raw?.app_base_url;
+  if (!appBaseUrl) {
+    try {
+      appBaseUrl = new URL(apiBaseUrl).origin;
+    } catch {
+      appBaseUrl = 'https://agentboard.cloud';
+    }
+  }
+
+  return {
+    version: 2,
+    device_id: raw?.device_id,
+    api_base_url: apiBaseUrl,
+    app_base_url: stripTrailingSlash(appBaseUrl),
+    default_server: {
+      api_base_url: apiBaseUrl,
+      app_base_url: stripTrailingSlash(appBaseUrl),
+      device_id: raw?.device_id,
+    },
+    bindings: [],
+    snapshot_target: 'routed',
+  };
+}
+
+function normalizeServerRef(server) {
+  if (!server) return server;
+  return {
+    ...server,
+    api_base_url: stripTrailingSlash(migrateLegacyHost(server.api_base_url)),
+    app_base_url: stripTrailingSlash(migrateLegacyHost(server.app_base_url)),
+  };
+}
+
+/**
+ * Credential for a route. The default route keeps using .token (written by
+ * `agentboard login`); connected projects each have their own file.
+ */
+export function loadRouteCredential(credentialRef) {
+  if (!credentialRef) return loadToken();
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(credentialRef)) return null;
+  const credPath = join(CONFIG_DIR, 'credentials', credentialRef + '.cred');
+  if (!existsSync(credPath)) return null;
+  try {
+    return readFileSync(credPath, 'utf-8').trim() || null;
   } catch {
     return null;
   }
@@ -119,7 +208,7 @@ function saveHookSent(sent) {
   try {
     pruneHookSent(sent, Date.now());
     mkdirSync(CONFIG_DIR, { recursive: true });
-    writeFileSync(HOOK_SENT_PATH, JSON.stringify(sent, null, 2) + '\n', { mode: 0o600 });
+    writeJsonAtomic(HOOK_SENT_PATH, sent);
   } catch {
     // best-effort
   }
@@ -182,13 +271,37 @@ export function getSentTotals(source, sessionId) {
 }
 
 /**
- * Persist the cumulative token totals uploaded so far for a session.
+ * The route a session was pinned to by its first successful upload.
+ *
+ * A session must never change server mid-flight: the ledger holds ONE
+ * cumulative total per session, so a route change would hand the new server the
+ * entire cumulative figure, including work done before the change. Records
+ * written before v0.7.0 carry no route and belong to the default server.
+ *
+ * Returns null when the session has never uploaded, which means it is still
+ * free to be routed by cwd.
  */
-export function markTotalsSent(source, sessionId, totals) {
+export function getSentRoute(source, sessionId) {
   const sent = loadHookSent();
-  sent[hookSentKey(source, sessionId)] = {
+  const record = sent[hookSentKey(source, sessionId)];
+  if (!record) return null;
+  return record.route ?? DEFAULT_ROUTE_ID;
+}
+
+/**
+ * Persist the cumulative token totals uploaded so far for a session.
+ *
+ * `route` pins the session (see getSentRoute). Passing undefined keeps whatever
+ * pin is already recorded rather than clearing it.
+ */
+export function markTotalsSent(source, sessionId, totals, route) {
+  const sent = loadHookSent();
+  const key = hookSentKey(source, sessionId);
+  const previous = sent[key];
+  sent[key] = {
     sentAt: new Date().toISOString(),
     totals: normalizeTotals(totals),
+    ...(route ?? previous?.route ? { route: route ?? previous.route } : {}),
   };
   saveHookSent(sent);
 }

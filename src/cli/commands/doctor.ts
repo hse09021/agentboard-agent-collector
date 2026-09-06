@@ -2,7 +2,10 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { loadConfig, getConfigDir, getHookSentPath } from "../../core/config";
-import { hasToken, loadToken } from "../../platform/credential-store";
+import { hasToken, loadToken, listCredentialRefs } from "../../platform/credential-store";
+import { describeTokenExpiry } from "../../core/jwt";
+import { loadConfigV2, findOrphans } from "../../core/bindings";
+import { scanGhostSessions, removeGhostSessions } from "../../core/ghost-sessions";
 import { createApiClient } from "../../api/client";
 import { COLLECTOR_VERSION } from "../../core/usage-event";
 import { logger } from "../../core/logger";
@@ -19,14 +22,34 @@ async function runChecks(): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
 
   // 1. Auth token
+  //
+  // Checking that the file exists tells us nothing useful: an expired token
+  // sits on disk exactly like a valid one, so every upload could be failing
+  // with a 401 while this check stayed green. Decode the expiry locally —
+  // no signature verification needed, and none is possible here anyway.
   const tokenPresent = hasToken();
-  results.push({
-    label: "Auth token",
-    ok: tokenPresent,
-    message: tokenPresent
-      ? "Token found"
-      : "Not logged in — run `agentboard login`",
-  });
+  if (!tokenPresent) {
+    results.push({
+      label: "Auth token",
+      ok: false,
+      message: "Not logged in — run `agentboard login`",
+    });
+  } else {
+    const expiry = describeTokenExpiry(loadToken());
+    const described =
+      expiry.kind === "expired"
+        ? `Expired ${expiry.expiresAt.toISOString().slice(0, 10)} — run \`agentboard login\` again`
+        : expiry.kind === "expiring"
+          ? `Expires in ${expiry.daysLeft} day(s)`
+          : expiry.kind === "valid"
+            ? `Valid for ${expiry.daysLeft} more day(s)`
+            : "Present (opaque token — expiry unknown)";
+    results.push({
+      label: "Auth token",
+      ok: expiry.kind !== "expired",
+      message: described,
+    });
+  }
 
   // 2. Config directory
   const configDir = getConfigDir();
@@ -147,10 +170,71 @@ async function runChecks(): Promise<CheckResult[]> {
     results.push({ label, ok: registered, message });
   }
 
+
+  // 7. Connected projects
+  //
+  // The single most useful line when someone asks "why is my work not showing
+  // up in the org dashboard" — almost always the answer is that the directory
+  // was never connected, so the data went to the community server instead.
+  const v2 = loadConfigV2();
+  results.push({
+    label: "Connected projects",
+    ok: true,
+    message:
+      v2.bindings.length === 0
+        ? "None — all usage goes to the community server"
+        : v2.bindings
+            .map((b) => `${b.project_label ?? b.abs_dir} -> ${b.server.label ?? b.server.app_base_url}`)
+            .join("; "),
+  });
+
+  // 8. Credential/binding consistency
+  //
+  // `connect` writes the credential first and the binding last, so an
+  // interruption leaves one without the other. Neither is dangerous, but a
+  // binding without a credential silently stops uploading.
+  const orphans = findOrphans(v2, listCredentialRefs());
+  const orphanCount =
+    orphans.bindingsWithoutCredential.length + orphans.credentialsWithoutBinding.length;
+  results.push({
+    label: "Credentials",
+    ok: orphans.bindingsWithoutCredential.length === 0,
+    message:
+      orphanCount === 0
+        ? "Consistent"
+        : `${orphans.bindingsWithoutCredential.length} binding(s) missing a credential, ` +
+          `${orphans.credentialsWithoutBinding.length} unused credential(s)`,
+  });
+
+  // 9. Leftover /usage transcripts
+  //
+  // v0.7.0 stops creating these, but the ones already on disk still clutter the
+  // /resume picker. Reported only — they belong to Claude Code, so removal is
+  // never automatic.
+  const ghosts = scanGhostSessions();
+  if (!ghosts.missingRoot) {
+    results.push({
+      label: "Session list",
+      ok: ghosts.ghosts.length === 0,
+      message:
+        ghosts.ghosts.length === 0
+          ? "No leftover /usage sessions"
+          : `${ghosts.ghosts.length} leftover /usage session(s) from older collector versions — ` +
+            `run \`agentboard doctor --clean-sessions\` to remove them`,
+    });
+  }
+
   return results;
 }
 
-export async function doctorCommand(): Promise<void> {
+export async function doctorCommand(
+  options: { cleanSessions?: boolean } = {}
+): Promise<void> {
+  if (options.cleanSessions) {
+    await cleanGhostSessions();
+    return;
+  }
+
   logger.plain("");
   logger.plain(chalk.bold("AgentBoard Doctor — Diagnostics"));
   logger.plain("─".repeat(50));
@@ -171,6 +255,47 @@ export async function doctorCommand(): Promise<void> {
     logger.success("All checks passed.");
   } else {
     logger.warn("Some checks failed. See details above.");
+  }
+  logger.plain("");
+}
+
+/**
+ * Removes the /usage transcripts left behind by collector versions before
+ * v0.7.0.
+ *
+ * These files belong to Claude Code, so this only ever runs when explicitly
+ * asked for, prints what it is about to delete, and re-verifies each file
+ * immediately before removing it.
+ */
+async function cleanGhostSessions(): Promise<void> {
+  const scan = scanGhostSessions();
+
+  logger.plain("");
+  logger.plain(chalk.bold("Clean leftover /usage sessions"));
+  logger.plain("-".repeat(50));
+  logger.plain("");
+
+  if (scan.missingRoot) {
+    logger.warn("Claude Code session directory not found — nothing to clean.");
+    return;
+  }
+  if (scan.ghosts.length === 0) {
+    logger.success(`No leftover sessions. ${scan.keptCount} real session(s) untouched.`);
+    return;
+  }
+
+  const totalKb = scan.ghosts.reduce((n, g) => n + g.sizeBytes, 0) / 1024;
+  logger.plain(
+    `Found ${chalk.bold(String(scan.ghosts.length))} leftover /usage session(s) ` +
+      `(${totalKb.toFixed(1)} KB). ${scan.keptCount} real session(s) will be kept.`
+  );
+  logger.plain("");
+
+  const { removed, failed } = removeGhostSessions(scan.ghosts);
+
+  logger.success(`Removed ${removed.length} leftover session(s).`);
+  for (const f of failed) {
+    logger.warn(`  Kept ${f.filePath}: ${f.reason}`);
   }
   logger.plain("");
 }

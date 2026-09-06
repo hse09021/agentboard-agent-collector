@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { execSync } from "child_process";
-import { loadConfig } from "../../core/config";
+import { loadConfig, saveConfig } from "../../core/config";
 import { loadToken } from "../../platform/credential-store";
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
@@ -244,7 +244,11 @@ function unregisterClaudeHook(): "removed" | "not-found" {
 
 // ─── Codex CLI hook registration ─────────────────────────────────────────────
 
-const CODEX_NOTIFY_COMMENT = "# agentboard-notify";
+import {
+  CODEX_NOTIFY_COMMENT,
+  rewriteCodexNotify,
+  removeCodexNotify,
+} from "../../core/codex-notify";
 
 function buildCodexNotifyLine(
   nodePath: string,
@@ -269,29 +273,30 @@ function registerCodexHook(
 
   const newLine = buildCodexNotifyLine(nodePath, notifyScript);
 
-  // Already pointing at the exact current line? Nothing to do. Otherwise fall
-  // through and re-write, so an upgraded install whose script path changed
-  // (e.g. moved into codex/) gets re-pointed instead of left stale.
-  if (existing.split("\n").some((l) => l.trim() === newLine.trim())) {
-    return "already-registered";
+  // Codex honours exactly one root-level `notify`, so registering ours has to
+  // displace anything else. Before v0.7.0 that happened silently and a user's
+  // own notification script was gone for good — now it is reported and
+  // remembered so `uninstall-hooks` can put it back.
+  const { content: updated, displaced, unchanged } = rewriteCodexNotify(
+    existing,
+    newLine
+  );
+
+  if (unchanged) return "already-registered";
+
+  if (displaced) {
+    try {
+      saveConfig({ codex_displaced_notify: displaced } as never);
+    } catch {
+      // Losing the record only costs the restore-on-uninstall convenience.
+    }
+    process.stderr.write(
+      `\nagentboard: replaced an existing Codex \`notify\` setting:\n` +
+        `  ${displaced}\n` +
+        `Codex allows only one. \`agentboard uninstall-hooks\` will restore it.\n\n`
+    );
   }
 
-  const cleaned = existing
-    .split("\n")
-    .filter((l) => !/^\s*notify\s*=/.test(l))
-    .join("\n");
-
-  const lines = cleaned.split("\n");
-  const firstSectionIdx = lines.findIndex((l) => /^\s*\[/.test(l));
-  let updated: string;
-  if (firstSectionIdx === -1) {
-    updated =
-      cleaned.trimEnd() + (cleaned.trim() ? "\n" : "") + newLine + "\n";
-  } else {
-    lines.splice(firstSectionIdx, 0, newLine, "");
-    updated = lines.join("\n");
-    if (!updated.endsWith("\n")) updated += "\n";
-  }
 
   try {
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
@@ -313,12 +318,19 @@ function unregisterCodexHook(): "removed" | "not-found" {
     return "not-found";
   }
 
-  if (!existing.includes(CODEX_NOTIFY_COMMENT)) return "not-found";
+  const displaced = (loadConfig() as { codex_displaced_notify?: string })
+    .codex_displaced_notify;
+  const { content: updated, changed } = removeCodexNotify(existing, displaced);
+  if (!changed) return "not-found";
 
-  const updated = existing
-    .split("\n")
-    .filter((l) => !l.includes(CODEX_NOTIFY_COMMENT))
-    .join("\n");
+  if (displaced) {
+    try {
+      saveConfig({ codex_displaced_notify: undefined } as never);
+    } catch {
+      /* best-effort */
+    }
+  }
+
 
   try {
     fs.writeFileSync(configPath, updated, { mode: 0o600 });

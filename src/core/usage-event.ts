@@ -1,4 +1,12 @@
-export const COLLECTOR_VERSION = "0.6.0";
+// Generated from package.json by scripts/generate-version.mjs (run by `npm run build`).
+// Re-exported here so every existing importer keeps working unchanged.
+export { COLLECTOR_VERSION } from "./version";
+
+// Wire-format version of the UsageEvent payload. The server pins this value
+// exactly (`z.literal("1.0")`), so bumping it without a coordinated server
+// change makes every event fail validation.
+// Keep in sync with plugin/hooks/lib/config.mjs.
+export const SCHEMA_VERSION = "1.0" as const;
 
 // Sources this collector actively collects from. Hook registration, session
 // parsing and CLI output are all scoped to these.
@@ -21,7 +29,7 @@ export interface UsageSnapshot {
 }
 
 export interface UsageEvent {
-  schema_version: "1.0";
+  schema_version: typeof SCHEMA_VERSION;
   event_id: string;
   user_id?: string;
   device_id: string;
