@@ -1,0 +1,124 @@
+name: fix — 버그 신고
+description: "동작이 깨졌거나 의도와 다르게 동작합니다 — 브랜치: fix/"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        신고해 주셔서 감사합니다. 프롬프트, 코드, 파일 경로, 저장소 내용은
+        **붙여넣지 마세요.** 수집기가 의도적으로 수집하지 않는 데이터입니다.
+        훅 로그나 `doctor` 출력을 첨부하실 때도 경로·토큰을 먼저 지워 주세요.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 무슨 일이 일어났나요
+      description: 관찰한 동작과, 기대했던 동작을 함께 적어 주세요.
+      placeholder: |
+        Codex 세션이 끝나도 대시보드에 사용량이 올라오지 않습니다.
+        기대: 세션 종료 후 몇 초 안에 대시보드에 반영되어야 합니다.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 재현 방법
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 어디에서 발생하나요
+      multiple: true
+      options:
+        - CLI 명령 (login, logout, status, doctor)
+        - 훅 설치 (install-hooks, uninstall-hooks)
+        - Claude Code 훅 (plugin/hooks/claude)
+        - Codex 훅 (plugin/hooks/codex)
+        - 훅 공용 라이브러리 (plugin/hooks/lib — 전송, 사용량 한도)
+        - 이벤트 전송 / API 클라이언트 (src/api)
+        - 설정·자격증명 저장 (src/core, src/platform)
+        - 설치 자체가 안 됨 (npm install, build)
+        - 잘 모르겠음
+    validations:
+      required: true
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: 어떤 AI 도구에서 발생하나요
+      multiple: true
+      options:
+        - Claude Code
+        - Codex CLI
+        - 양쪽 모두
+        - 해당 없음 (CLI 자체 문제)
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`agentboard doctor` 출력"
+      description: |
+        대부분의 문제는 이 출력만으로 원인이 좁혀집니다.
+        토큰이나 개인 경로가 보이면 지운 뒤 붙여넣어 주세요.
+      render: shell
+      placeholder: |
+        $ agentboard doctor
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 로그 또는 에러 출력
+      description: |
+        훅 로그, CLI 에러 메시지, 백그라운드 워커 출력.
+        훅은 비동기로 동작하므로 터미널에 바로 안 보일 수 있습니다.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: 수집기 버전
+      description: "`agentboard --version` 결과."
+      placeholder: "0.3.0"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: 실행 환경
+      description: 운영체제, Node 버전, 설치 방식(npm 글로벌 / 클론 후 npm link).
+      placeholder: "macOS 15.6 / Node 20.11 / npm 글로벌"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: severity
+    attributes:
+      label: 영향 범위
+      options:
+        - label: 사용량이 전혀 수집되지 않음
+        - label: 수집은 되지만 수치가 틀림 (중복, 누락, 잘못된 날짜)
+        - label: 로그인 또는 이벤트 업로드가 막힘
+        - label: AI 도구 자체가 느려지거나 멈춤
+        - label: 프라이버시 문제 — 수집되면 안 되는 데이터가 전송됨
+
+  - type: input
+    id: branch-slug
+    attributes:
+      label: 브랜치 슬러그 (영문)
+      description: |
+        `ready` 라벨을 붙이면 이 값으로 작업 브랜치가 만들어집니다.
+        영문 소문자·숫자·하이픈만 쓰세요. 짧을수록 좋습니다 (2~4 단어).
+        비워 두면 이슈 번호만으로 만들어집니다 — 예: `fix/42`
+      placeholder: "codex-session-end-missing"

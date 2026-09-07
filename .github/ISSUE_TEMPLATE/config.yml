@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 대시보드·서버 관련 이슈
+    url: https://github.com/hse09021/ai-cost-dashboard/issues/new/choose
+    about: 웹 대시보드, API 서버, 로그인, 리더보드 문제는 이쪽에 올려 주세요. 이 저장소는 수집기 CLI 전용입니다.
