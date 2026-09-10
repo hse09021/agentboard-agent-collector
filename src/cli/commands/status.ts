@@ -199,7 +199,7 @@ export async function statusCommand(): Promise<void> {
     renderUsageTable(monthSummary, monthBySource, "This month");
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) {
-      logger.warn("Could not fetch usage data: login expired. Run `agentboard login` again.");
+      logger.warn("Could not fetch usage data: login expired. Run `agentboard logout` and `agentboard login` again.");
     } else if (err instanceof ApiError) {
       logger.warn(`Could not fetch usage data: API returned HTTP ${err.status}. Run \`agentboard doctor\`.`);
     } else {
