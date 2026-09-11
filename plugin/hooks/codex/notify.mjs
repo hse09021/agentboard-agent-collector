@@ -16,6 +16,7 @@
 
 import { parseCodexFile, findCodexSessionFile } from './parse-codex.mjs';
 import { recordAgentHomesFromEnv } from '../lib/agent-homes.mjs';
+import { isSweepEnabled, maybeSpawnSweep } from '../lib/sweep.mjs';
 import { buildUsageEvent, buildUsageOnlyEvent } from './event.mjs';
 import {
   loadConfigV2,
@@ -95,6 +96,13 @@ async function main() {
   // Codex's CODEX_HOME. Recording it is what makes an orchestrator-launched
   // agent (Orca points CODEX_HOME at its own runtime home) discoverable later.
   recordAgentHomesFromEnv();
+
+  // Detached and throttled — collects sessions belonging to agents whose own
+  // home has no agentboard hooks, which is how a different-CLI sub-agent gets
+  // counted at all. Costs this hook a config read and a spawn.
+  if (isSweepEnabled(config)) {
+    maybeSpawnSweep({ source: 'codex', sessionId });
+  }
 
   // One in-flight upload per thread. Notify fires per turn, and a slow run
   // (retry loop + upload) can still be going when the next turn's notify

@@ -102,6 +102,9 @@ export function loadConfigV2() {
       default_server: normalizeServerRef(raw.default_server),
       bindings: (raw.bindings ?? []).map((b) => ({ ...b, server: normalizeServerRef(b.server) })),
       snapshot_target: raw.snapshot_target ?? 'routed',
+      // Unknown values coerce to the documented default rather than throwing:
+      // a typo in a hand-edited config must not silently stop collection.
+      sweep: raw.sweep === 'off' ? 'off' : 'registered',
     };
   }
 
@@ -130,6 +133,7 @@ export function loadConfigV2() {
     },
     bindings: [],
     snapshot_target: 'routed',
+    sweep: 'registered',
   };
 }
 
@@ -294,6 +298,13 @@ export function getSentRoute(source, sessionId) {
   const sent = loadHookSent();
   const record = sent[hookSentKey(source, sessionId)];
   if (!record) return null;
+  // A seeded record is a watermark, not an upload: the sweep wrote it to say
+  // "these tokens predate collection, never send them", and no server has ever
+  // seen this session. Reporting DEFAULT_ROUTE_ID here would pin it to the
+  // community server for good — so a seeded session inside a connected
+  // directory would later ship that organization's work to the wrong place.
+  // Still unrouted means still free to be routed by its own cwd.
+  if (record.seeded && record.route === undefined) return null;
   return record.route ?? DEFAULT_ROUTE_ID;
 }
 
@@ -310,6 +321,68 @@ export function markTotalsSent(source, sessionId, totals, route) {
   sent[key] = {
     sentAt: new Date().toISOString(),
     totals: normalizeTotals(totals),
+    ...(route ?? previous?.route ? { route: route ?? previous.route } : {}),
+  };
+  saveHookSent(sent);
+}
+
+/**
+ * Record a session's cumulative totals WITHOUT uploading them.
+ *
+ * The cross-agent sweep discovers sessions that predate collection. Uploading
+ * those would retroactively ship months of history the user never opted into,
+ * so instead their totals are written as a watermark: the session is now known,
+ * and only tokens accrued from here on are ever sent.
+ *
+ * Deliberately writes no `route` — see getSentRoute for why that matters.
+ */
+export function markTotalsSeeded(source, sessionId, totals) {
+  const sent = loadHookSent();
+  const key = hookSentKey(source, sessionId);
+  // Never downgrade a real upload record into a seed: that would drop the route
+  // pin and re-send everything the next time the session is touched.
+  if (sent[key] && !sent[key].seeded) return;
+  sent[key] = {
+    sentAt: new Date().toISOString(),
+    totals: normalizeTotals(totals),
+    seeded: true,
+  };
+  saveHookSent(sent);
+}
+
+/**
+ * Like markTotalsSent, but takes the per-field maximum against what is already
+ * recorded instead of overwriting it.
+ *
+ * The sweep can legitimately meet the same session twice in one run, because an
+ * orchestrator may keep a backfilled copy of an agent's session directory
+ * alongside the live one (Orca copies ~/.codex/sessions into its runtime home).
+ * Those copies can be at different points in the session's life. Overwriting
+ * with the older copy's cumulative would move the ledger BACKWARDS, and the
+ * next run would re-upload everything in between as a fresh delta.
+ *
+ * Cumulative session totals never legitimately shrink, so max is always the
+ * correct reading. Scoped to the sweep; the direct hooks keep using
+ * markTotalsSent, where there is exactly one copy and no ambiguity.
+ */
+export function markTotalsSentMonotonic(source, sessionId, totals, route) {
+  const sent = loadHookSent();
+  const key = hookSentKey(source, sessionId);
+  const previous = sent[key];
+  const prior = normalizeTotals(previous?.seeded ? previous.totals : previous?.totals);
+  const next = normalizeTotals(totals);
+
+  sent[key] = {
+    sentAt: new Date().toISOString(),
+    totals: {
+      inputTokens: Math.max(prior.inputTokens, next.inputTokens),
+      outputTokens: Math.max(prior.outputTokens, next.outputTokens),
+      cacheCreationTokens: Math.max(prior.cacheCreationTokens, next.cacheCreationTokens),
+      cacheCreation5mTokens: Math.max(prior.cacheCreation5mTokens, next.cacheCreation5mTokens),
+      cacheCreation1hTokens: Math.max(prior.cacheCreation1hTokens, next.cacheCreation1hTokens),
+      cacheReadTokens: Math.max(prior.cacheReadTokens, next.cacheReadTokens),
+      totalTokens: Math.max(prior.totalTokens, next.totalTokens),
+    },
     ...(route ?? previous?.route ? { route: route ?? previous.route } : {}),
   };
   saveHookSent(sent);

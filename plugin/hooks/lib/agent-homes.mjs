@@ -33,7 +33,7 @@
  * Keep in sync with src/core/agent-homes.ts.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { CONFIG_DIR } from './config.mjs';
@@ -202,26 +202,76 @@ function orcaUserDataDirs() {
 }
 
 /**
- * Orca relocates Codex to <userData>/codex-runtime-home/home and writes its
- * rollouts to <that>/sessions. Verified against a real install; the directory
- * holds its own config.toml, auth.json and a real (non-symlink) sessions dir.
+ * Where Orca keeps a hot-swapped account's config home, per agent.
+ *
+ * Orca creates <userData>/<accountsDir>/<accountId>/<leaf>, drops a marker file
+ * inside it, and points CODEX_HOME / CLAUDE_CONFIG_DIR at it when launching an
+ * agent under that account — so that account's settings AND its transcripts
+ * live there instead of under ~/. The two agents do not share a layout: Codex
+ * ends in `home`, Claude in `auth`, and the markers differ.
  */
-export function orcaCodexHomes() {
-  return orcaUserDataDirs()
-    .map((root) => join(root, 'codex-runtime-home', 'home'))
-    .filter((dir) => existsSync(dir));
+const ORCA_ACCOUNT_LAYOUTS = {
+  codex: { accountsDir: 'codex-accounts', leaf: 'home', marker: '.orca-managed-home' },
+  claude_code: {
+    accountsDir: 'claude-accounts',
+    leaf: 'auth',
+    marker: '.orca-managed-claude-auth',
+  },
+};
+
+/**
+ * One readdir of a single deterministic directory whose every child is by
+ * definition a managed home for that agent, and each candidate still has to
+ * carry Orca's own marker file. That is not a search for candidates — nothing
+ * outside <accountsDir>/ is ever looked at.
+ */
+function orcaManagedAccountHomes(kind) {
+  const layout = ORCA_ACCOUNT_LAYOUTS[kind];
+  if (!layout) return [];
+
+  const out = [];
+  for (const root of orcaUserDataDirs()) {
+    const accountsDir = join(root, layout.accountsDir);
+    if (!existsSync(accountsDir)) continue;
+
+    let entries;
+    try {
+      entries = readdirSync(accountsDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const home = join(accountsDir, entry.name, layout.leaf);
+      if (existsSync(join(home, layout.marker))) out.push(home);
+    }
+  }
+  return out;
 }
 
 /**
- * The Claude counterpart. Not observed on any install we have inspected —
- * Orca appears to drive managed Claude accounts through CLAUDE_CONFIG_DIR,
- * which the 'runtime' origin already catches. Kept because it is existsSync-
- * gated, so a wrong guess costs nothing and a right one costs nothing to have.
+ * Codex under Orca: the shared runtime home plus any hot-swapped account home.
+ *
+ * <userData>/codex-runtime-home/home is verified against a real install — it
+ * holds its own config.toml, auth.json and a real (non-symlink) sessions dir.
+ */
+export function orcaCodexHomes() {
+  return [
+    ...orcaUserDataDirs()
+      .map((root) => join(root, 'codex-runtime-home', 'home'))
+      .filter((dir) => existsSync(dir)),
+    ...orcaManagedAccountHomes('codex'),
+  ];
+}
+
+/**
+ * Claude under Orca has no shared runtime home — only per-account ones. Until a
+ * second account exists, Orca runs Claude against ~/.claude, which is why this
+ * usually returns nothing.
  */
 export function orcaClaudeHomes() {
-  return orcaUserDataDirs()
-    .map((root) => join(root, 'claude-runtime-home', 'home'))
-    .filter((dir) => existsSync(dir));
+  return orcaManagedAccountHomes('claude_code');
 }
 
 function envHomesFor(kind, env) {

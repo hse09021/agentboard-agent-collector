@@ -5,7 +5,8 @@ import { loadConfig, getConfigDir, getHookSentPath } from "../../core/config";
 import { hasToken, loadToken, listCredentialRefs } from "../../platform/credential-store";
 import { describeTokenExpiry } from "../../core/jwt";
 import { loadConfigV2, findOrphans } from "../../core/bindings";
-import { scanGhostSessions, removeGhostSessions } from "../../core/ghost-sessions";
+import { scanAllGhostSessions, removeGhostSessions } from "../../core/ghost-sessions";
+import { listAgentHomes } from "../../core/agent-homes";
 import { createApiClient } from "../../api/client";
 import { COLLECTOR_VERSION } from "../../core/usage-event";
 import { logger } from "../../core/logger";
@@ -15,6 +16,24 @@ interface CheckResult {
   label: string;
   ok: boolean;
   message: string;
+}
+
+/**
+ * Reads the sweep's state file directly rather than importing
+ * plugin/hooks/lib/sweep.mjs — the hooks are ESM and this CLI compiles to
+ * CommonJS, the same reason routing/path-normalize/atomic-write each exist in
+ * both forms. Only two fields are read, so a copy is cheaper than a third
+ * mirrored module.
+ */
+function readSweepState(): { lastSweepFinishedAt?: string; lastReport?: Record<string, unknown> } {
+  const file = path.join(getConfigDir(), "sweep-state.json");
+  try {
+    if (!fs.existsSync(file)) return {};
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8"));
+    return raw && raw.version === 1 ? raw : {};
+  } catch {
+    return {};
+  }
 }
 
 async function runChecks(): Promise<CheckResult[]> {
@@ -105,17 +124,19 @@ async function runChecks(): Promise<CheckResult[]> {
     message: `v${COLLECTOR_VERSION}`,
   });
 
-  // 6. Hook registration checks
-  const home = os.homedir();
+  // 6. Hook registration checks — one row per agent home, not one per tool.
+  // An agent an orchestrator launched against a relocated CODEX_HOME /
+  // CLAUDE_CONFIG_DIR has its own settings file, and whether OUR hooks are in
+  // THAT file is the thing that actually determines if it gets collected.
   const hookChecks: Array<{ label: string; file: string }> = [
-    {
-      label: "Hook: claude_code",
-      file: path.join(home, ".claude", "settings.json"),
-    },
-    {
-      label: "Hook: codex",
-      file: path.join(home, ".codex", "config.toml"),
-    },
+    ...listAgentHomes("claude_code").map((h) => ({
+      label: `Hook: claude_code (${h.origin})`,
+      file: path.join(h.dir, "settings.json"),
+    })),
+    ...listAgentHomes("codex").map((h) => ({
+      label: `Hook: codex (${h.origin})`,
+      file: path.join(h.dir, "config.toml"),
+    })),
   ];
 
   for (const { label, file } of hookChecks) {
@@ -170,6 +191,46 @@ async function runChecks(): Promise<CheckResult[]> {
     results.push({ label, ok: registered, message });
   }
 
+  // 6.5 Sweep coverage.
+  //
+  // This is the honest-disclosure line. The sweep collects sessions from homes
+  // whose agent has no agentboard hooks at all, which is exactly how a
+  // different-CLI sub-agent gets counted — and exactly why the user should be
+  // able to see the reach at a glance, and turn it off.
+  const v2ForSweep = loadConfigV2();
+  const sweptHomes = [...listAgentHomes("claude_code"), ...listAgentHomes("codex")];
+  const hookedCount = sweptHomes.filter((h) => {
+    const file =
+      h.kind === "codex" ? path.join(h.dir, "config.toml") : path.join(h.dir, "settings.json");
+    try {
+      return fs.existsSync(file) && fs.readFileSync(file, "utf-8").includes("agentboard");
+    } catch {
+      return false;
+    }
+  }).length;
+
+  if (v2ForSweep.sweep === "off") {
+    results.push({
+      label: "Sweep",
+      ok: true,
+      message:
+        sweptHomes.length > hookedCount
+          ? `off — sessions in ${sweptHomes.length - hookedCount} home(s) are NOT collected`
+          : "off",
+    });
+  } else {
+    const state = readSweepState();
+    const last = state.lastSweepFinishedAt
+      ? `last run ${new Date(state.lastSweepFinishedAt).toLocaleString()}`
+      : "not run yet";
+    results.push({
+      label: "Sweep",
+      ok: true,
+      message:
+        `registered — ${sweptHomes.length} home(s) covered ` +
+        `(${hookedCount} hooked, ${sweptHomes.length - hookedCount} sweep-only), ${last}`,
+    });
+  }
 
   // 7. Connected projects
   //
@@ -211,7 +272,7 @@ async function runChecks(): Promise<CheckResult[]> {
   // v0.7.0 stops creating these, but the ones already on disk still clutter the
   // /resume picker. Reported only — they belong to Claude Code, so removal is
   // never automatic.
-  const ghosts = scanGhostSessions();
+  const ghosts = scanAllGhostSessions();
   if (!ghosts.missingRoot) {
     results.push({
       label: "Session list",
@@ -268,7 +329,7 @@ export async function doctorCommand(
  * immediately before removing it.
  */
 async function cleanGhostSessions(): Promise<void> {
-  const scan = scanGhostSessions();
+  const scan = scanAllGhostSessions();
 
   logger.plain("");
   logger.plain(chalk.bold("Clean leftover /usage sessions"));

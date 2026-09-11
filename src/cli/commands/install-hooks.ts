@@ -1,9 +1,18 @@
 import * as fs from "fs";
 import * as path from "path";
-import * as os from "os";
 import { execSync } from "child_process";
 import { loadConfig, saveConfig } from "../../core/config";
 import { loadToken } from "../../platform/credential-store";
+import {
+  defaultClaudeHome,
+  defaultCodexHome,
+  discoverInstallTargets,
+  listAgentHomes,
+  recordAgentHome,
+  saveAgentHomes,
+  type AgentHomeEntry,
+} from "../../core/agent-homes";
+import { normalizePath } from "../../core/path-normalize";
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -16,18 +25,21 @@ function getHooksDir(): string {
   return path.resolve(__dirname, "../../../plugin/hooks");
 }
 
-const HOME = os.homedir();
-
-function getClaudeSettingsPath(): string {
-  return path.join(HOME, ".claude", "settings.json");
+// Every path helper is home-parameterised. There used to be a module-level
+// `HOME = os.homedir()`, which is precisely why hooks were only ever installed
+// into ~/.claude and ~/.codex — and why an agent an orchestrator launched
+// against a different CODEX_HOME / CLAUDE_CONFIG_DIR had no hooks at all and
+// went uncollected.
+function getClaudeSettingsPath(home: string = defaultClaudeHome()): string {
+  return path.join(home, "settings.json");
 }
 
-function getCodexConfigPath(): string {
-  return path.join(HOME, ".codex", "config.toml");
+function getCodexConfigPath(home: string = defaultCodexHome()): string {
+  return path.join(home, "config.toml");
 }
 
-function getCodexHooksJsonPath(): string {
-  return path.join(HOME, ".codex", "hooks.json");
+function getCodexHooksJsonPath(home: string = defaultCodexHome()): string {
+  return path.join(home, "hooks.json");
 }
 
 // ─── CLI detection ────────────────────────────────────────────────────────────
@@ -224,9 +236,13 @@ function claudeHookEntry(nodeExe: string, scriptPath: string) {
   };
 }
 
-function registerClaudeHook(nodeExe: string, scriptPath: string): HookResult {
+function registerClaudeHook(
+  nodeExe: string,
+  scriptPath: string,
+  home: string = defaultClaudeHome()
+): HookResult {
   const results = CLAUDE_HOOK_EVENTS.map((event) =>
-    registerJsonHook(getClaudeSettingsPath(), event, claudeHookEntry(nodeExe, scriptPath))
+    registerJsonHook(getClaudeSettingsPath(home), event, claudeHookEntry(nodeExe, scriptPath))
   );
   // One combined verdict for reporting: any write failure wins, then any
   // addition (upgrades from SessionEnd-only installs land here), else no-op.
@@ -235,9 +251,9 @@ function registerClaudeHook(nodeExe: string, scriptPath: string): HookResult {
   return "already-registered";
 }
 
-function unregisterClaudeHook(): "removed" | "not-found" {
+function unregisterClaudeHook(home: string = defaultClaudeHome()): "removed" | "not-found" {
   const results = CLAUDE_HOOK_EVENTS.map((event) =>
-    unregisterJsonHook(getClaudeSettingsPath(), event)
+    unregisterJsonHook(getClaudeSettingsPath(home), event)
   );
   return results.includes("removed") ? "removed" : "not-found";
 }
@@ -257,11 +273,53 @@ function buildCodexNotifyLine(
   return `notify = [${JSON.stringify(nodePath)}, ${JSON.stringify(notifyScript)}] ${CODEX_NOTIFY_COMMENT}`;
 }
 
+/**
+ * A displaced `notify` line is now recorded per home.
+ *
+ * It used to be one scalar in config.json. With several Codex homes that scalar
+ * would be overwritten once per home and `uninstall-hooks` would restore the
+ * wrong line into the wrong file. The scalar is still written for the default
+ * home so an existing install can still be rolled back by an older collector.
+ */
+type DisplacedNotifyConfig = {
+  codex_displaced_notify?: string;
+  codex_displaced_notify_by_home?: Record<string, string>;
+};
+
+function rememberDisplacedNotify(home: string, displaced: string | undefined): void {
+  const key = normalizePath(home);
+  if (!key) return;
+  try {
+    const current = loadConfig() as DisplacedNotifyConfig;
+    const byHome = { ...(current.codex_displaced_notify_by_home ?? {}) };
+    if (displaced) byHome[key] = displaced;
+    else delete byHome[key];
+
+    const patch: DisplacedNotifyConfig = { codex_displaced_notify_by_home: byHome };
+    if (key === normalizePath(defaultCodexHome())) patch.codex_displaced_notify = displaced;
+    saveConfig(patch as never);
+  } catch {
+    // Losing the record only costs the restore-on-uninstall convenience.
+  }
+}
+
+function recallDisplacedNotify(home: string): string | undefined {
+  const key = normalizePath(home);
+  const current = loadConfig() as DisplacedNotifyConfig;
+  if (key && current.codex_displaced_notify_by_home?.[key]) {
+    return current.codex_displaced_notify_by_home[key];
+  }
+  // Pre-multi-home installs only ever recorded the default home.
+  if (key && key === normalizePath(defaultCodexHome())) return current.codex_displaced_notify;
+  return undefined;
+}
+
 function registerCodexHook(
   nodePath: string,
-  notifyScript: string
+  notifyScript: string,
+  home: string = defaultCodexHome()
 ): HookResult {
-  const configPath = getCodexConfigPath();
+  const configPath = getCodexConfigPath(home);
   let existing = "";
   if (fs.existsSync(configPath)) {
     try {
@@ -285,13 +343,9 @@ function registerCodexHook(
   if (unchanged) return "already-registered";
 
   if (displaced) {
-    try {
-      saveConfig({ codex_displaced_notify: displaced } as never);
-    } catch {
-      // Losing the record only costs the restore-on-uninstall convenience.
-    }
+    rememberDisplacedNotify(home, displaced);
     process.stderr.write(
-      `\nagentboard: replaced an existing Codex \`notify\` setting:\n` +
+      `\nagentboard: replaced an existing Codex \`notify\` setting in ${configPath}:\n` +
         `  ${displaced}\n` +
         `Codex allows only one. \`agentboard uninstall-hooks\` will restore it.\n\n`
     );
@@ -307,8 +361,8 @@ function registerCodexHook(
   }
 }
 
-function unregisterCodexHook(): "removed" | "not-found" {
-  const configPath = getCodexConfigPath();
+function unregisterCodexHook(home: string = defaultCodexHome()): "removed" | "not-found" {
+  const configPath = getCodexConfigPath(home);
   if (!fs.existsSync(configPath)) return "not-found";
 
   let existing: string;
@@ -318,18 +372,11 @@ function unregisterCodexHook(): "removed" | "not-found" {
     return "not-found";
   }
 
-  const displaced = (loadConfig() as { codex_displaced_notify?: string })
-    .codex_displaced_notify;
+  const displaced = recallDisplacedNotify(home);
   const { content: updated, changed } = removeCodexNotify(existing, displaced);
   if (!changed) return "not-found";
 
-  if (displaced) {
-    try {
-      saveConfig({ codex_displaced_notify: undefined } as never);
-    } catch {
-      /* best-effort */
-    }
-  }
+  if (displaced) rememberDisplacedNotify(home, undefined);
 
 
   try {
@@ -368,9 +415,10 @@ function codexHookCommand(nodePath: string, scriptPath: string): string {
 function registerCodexJsonHooks(
   nodePath: string,
   sessionEndScript: string,
-  subagentStopScript: string
+  subagentStopScript: string,
+  home: string = defaultCodexHome()
 ): HookResult {
-  const hooksPath = getCodexHooksJsonPath();
+  const hooksPath = getCodexHooksJsonPath(home);
   let root: Record<string, unknown> = {};
   if (fs.existsSync(hooksPath)) {
     try {
@@ -382,21 +430,32 @@ function registerCodexJsonHooks(
   if (typeof root.hooks !== "object" || root.hooks === null) root.hooks = {};
   const hooks = root.hooks as Record<string, unknown>;
 
-  const desired: Array<[string, string]> = [
-    ["SessionEnd", codexHookCommand(nodePath, sessionEndScript)],
-    ["SubagentStop", codexHookCommand(nodePath, subagentStopScript)],
+  // Per-event timeouts, because Codex does not honour one number for both.
+  // Codex 0.154 caps SessionEnd at 3s and prints
+  //   "warning: clamping SessionEnd hook timeout to 3s in <hooks.json>"
+  // at the top of every session that has a larger value. Asking for 30 there
+  // changed nothing except putting that warning in front of the user on every
+  // run, so we ask for what we actually get. Measured budget: the forced
+  // rate-limit read is ~0.8-1.1s and the parse+upload that follows is well
+  // under a second, so the real work fits.
+  const desired: Array<[string, string, number]> = [
+    ["SessionEnd", codexHookCommand(nodePath, sessionEndScript), 3],
+    ["SubagentStop", codexHookCommand(nodePath, subagentStopScript), 30],
   ];
 
   let changed = false;
-  for (const [event, command] of desired) {
+  for (const [event, command, timeout] of desired) {
     if (!Array.isArray(hooks[event])) hooks[event] = [];
     const arr = hooks[event] as Array<Record<string, unknown>>;
 
+    // The timeout is part of "already registered", not just the command.
+    // Otherwise an existing install keeps whatever number it was first written
+    // with, and a plain `install-hooks` would never correct it.
     const present = arr.some(
       (g) =>
         Array.isArray(g.hooks) &&
         (g.hooks as Array<Record<string, unknown>>).some(
-          (h) => h.command === command
+          (h) => h.command === command && h.timeout === timeout
         )
     );
     if (present) continue;
@@ -414,7 +473,7 @@ function registerCodexJsonHooks(
       (g) => !Array.isArray(g.hooks) || (g.hooks as unknown[]).length > 0
     );
     (hooks[event] as Array<Record<string, unknown>>).push({
-      hooks: [{ type: "command", command, timeout: 30 }],
+      hooks: [{ type: "command", command, timeout }],
     });
     changed = true;
   }
@@ -429,8 +488,8 @@ function registerCodexJsonHooks(
   }
 }
 
-function unregisterCodexJsonHooks(): "removed" | "not-found" {
-  const hooksPath = getCodexHooksJsonPath();
+function unregisterCodexJsonHooks(home: string = defaultCodexHome()): "removed" | "not-found" {
+  const hooksPath = getCodexHooksJsonPath(home);
   if (!fs.existsSync(hooksPath)) return "not-found";
 
   let root: Record<string, unknown>;
@@ -470,8 +529,14 @@ function unregisterCodexJsonHooks(): "removed" | "not-found" {
 
 // ─── install-hooks command ─────────────────────────────────────────────────────
 
+function homeLabel(home: AgentHomeEntry): string {
+  return home.origin === "default" ? "" : ` [${home.origin}]`;
+}
+
 export async function installHooksCommand(options: {
   force?: boolean;
+  home?: string[];
+  onlyDefaultHome?: boolean;
 }): Promise<void> {
   const config = loadConfig();
   const token = loadToken();
@@ -500,20 +565,33 @@ export async function installHooksCommand(options: {
 
   console.log("Installing agentboard session hooks...\n");
 
+  // Hooks go into every home an agent might actually be launched against, not
+  // just the one under homedir(). An orchestrator that relocates CODEX_HOME or
+  // CLAUDE_CONFIG_DIR would otherwise run a completely uninstrumented agent.
+  const claudeHomes = options.onlyDefaultHome
+    ? [{ kind: "claude_code", dir: defaultClaudeHome(), origin: "default" } as AgentHomeEntry]
+    : discoverInstallTargets("claude_code", { extraDirs: options.home });
+  const codexHomes = options.onlyDefaultHome
+    ? [{ kind: "codex", dir: defaultCodexHome(), origin: "default" } as AgentHomeEntry]
+    : discoverInstallTargets("codex", { extraDirs: options.home });
+
   // ── Claude Code ──────────────────────────────────────────────────────────
   if (!isClaudeInstalled()) {
     console.log(`   Claude Code   not installed — skipping`);
   } else {
-    const result = options.force
-      ? (unregisterClaudeHook(), registerClaudeHook(nodePath, sessionEndScript))
-      : registerClaudeHook(nodePath, sessionEndScript);
-    const claudePath = getClaudeSettingsPath();
-    if (result === "added") {
-      console.log(`✔  Claude Code   → ${claudePath} (Stop + SessionEnd)`);
-    } else if (result === "already-registered") {
-      console.log(`   Claude Code   already registered — skipping`);
-    } else {
-      console.warn(`⚠  Claude Code   → could not write ${claudePath}`);
+    for (const home of claudeHomes) {
+      if (options.force) unregisterClaudeHook(home.dir);
+      const result = registerClaudeHook(nodePath, sessionEndScript, home.dir);
+      const claudePath = getClaudeSettingsPath(home.dir);
+      if (result === "added") {
+        console.log(`✔  Claude Code   → ${claudePath} (Stop + SessionEnd)${homeLabel(home)}`);
+        recordAgentHome("claude_code", home.dir, "install");
+      } else if (result === "already-registered") {
+        console.log(`   Claude Code   already registered — skipping${homeLabel(home)}`);
+        recordAgentHome("claude_code", home.dir, "install");
+      } else {
+        console.warn(`⚠  Claude Code   → could not write ${claudePath}`);
+      }
     }
   }
 
@@ -522,35 +600,40 @@ export async function installHooksCommand(options: {
   if (!isCodexInstalled()) {
     console.log(`   Codex CLI     not installed — skipping`);
   } else {
-    if (options.force) {
-      unregisterCodexHook();
-      unregisterCodexJsonHooks();
-    }
-    const result = registerCodexHook(nodePath, codexNotifyScript);
-    const codexPath = getCodexConfigPath();
-    if (result === "added") {
-      console.log(`✔  Codex CLI     → ${codexPath} (notify)`);
-    } else if (result === "already-registered") {
-      console.log(`   Codex CLI     notify already registered — skipping`);
-    } else {
-      console.warn(`⚠  Codex CLI     → could not write ${codexPath}`);
-    }
+    for (const home of codexHomes) {
+      if (options.force) {
+        unregisterCodexHook(home.dir);
+        unregisterCodexJsonHooks(home.dir);
+      }
+      const result = registerCodexHook(nodePath, codexNotifyScript, home.dir);
+      const codexPath = getCodexConfigPath(home.dir);
+      if (result === "added") {
+        console.log(`✔  Codex CLI     → ${codexPath} (notify)${homeLabel(home)}`);
+        recordAgentHome("codex", home.dir, "install");
+      } else if (result === "already-registered") {
+        console.log(`   Codex CLI     notify already registered — skipping${homeLabel(home)}`);
+        recordAgentHome("codex", home.dir, "install");
+      } else {
+        console.warn(`⚠  Codex CLI     → could not write ${codexPath}`);
+      }
 
-    // Newer Codex builds also support hooks.json: SessionEnd (final rate-limit
-    // snapshot) and SubagentStop (subagent tokens). Older builds ignore it.
-    const jsonResult = registerCodexJsonHooks(
-      nodePath,
-      codexSessionEndScript,
-      codexSubagentStopScript
-    );
-    const hooksJsonPath = getCodexHooksJsonPath();
-    if (jsonResult === "added") {
-      console.log(`✔  Codex CLI     → ${hooksJsonPath} (SessionEnd + SubagentStop)`);
-      codexHooksJsonAdded = true;
-    } else if (jsonResult === "already-registered") {
-      console.log(`   Codex CLI     hooks.json already registered — skipping`);
-    } else {
-      console.warn(`⚠  Codex CLI     → could not write ${hooksJsonPath}`);
+      // Newer Codex builds also support hooks.json: SessionEnd (final rate-limit
+      // snapshot) and SubagentStop (subagent tokens). Older builds ignore it.
+      const jsonResult = registerCodexJsonHooks(
+        nodePath,
+        codexSessionEndScript,
+        codexSubagentStopScript,
+        home.dir
+      );
+      const hooksJsonPath = getCodexHooksJsonPath(home.dir);
+      if (jsonResult === "added") {
+        console.log(`✔  Codex CLI     → ${hooksJsonPath} (SessionEnd + SubagentStop)`);
+        codexHooksJsonAdded = true;
+      } else if (jsonResult === "already-registered") {
+        console.log(`   Codex CLI     hooks.json already registered — skipping${homeLabel(home)}`);
+      } else {
+        console.warn(`⚠  Codex CLI     → could not write ${hooksJsonPath}`);
+      }
     }
   }
 
@@ -571,26 +654,37 @@ export async function installHooksCommand(options: {
 export async function uninstallHooksCommand(): Promise<void> {
   console.log("Removing agentboard session hooks...\n");
 
-  const claudeResult = unregisterClaudeHook();
-  console.log(
-    claudeResult === "removed"
-      ? `✔  Claude Code   hook removed`
-      : `   Claude Code   hook not found — skipping`
-  );
+  // Every home the registry knows about, including ones a hook observed at
+  // runtime — leaving hooks behind in a relocated home would keep collecting
+  // after the user asked us to stop.
+  for (const home of listAgentHomes("claude_code", { includeMissing: true })) {
+    const result = unregisterClaudeHook(home.dir);
+    console.log(
+      result === "removed"
+        ? `✔  Claude Code   hook removed — ${getClaudeSettingsPath(home.dir)}`
+        : `   Claude Code   hook not found — skipping ${getClaudeSettingsPath(home.dir)}`
+    );
+  }
 
-  const codexResult = unregisterCodexHook();
-  console.log(
-    codexResult === "removed"
-      ? `✔  Codex CLI     notify removed`
-      : `   Codex CLI     notify not found — skipping`
-  );
+  for (const home of listAgentHomes("codex", { includeMissing: true })) {
+    const codexResult = unregisterCodexHook(home.dir);
+    console.log(
+      codexResult === "removed"
+        ? `✔  Codex CLI     notify removed — ${getCodexConfigPath(home.dir)}`
+        : `   Codex CLI     notify not found — skipping ${getCodexConfigPath(home.dir)}`
+    );
 
-  const codexJsonResult = unregisterCodexJsonHooks();
-  console.log(
-    codexJsonResult === "removed"
-      ? `✔  Codex CLI     hooks.json (SessionEnd + SubagentStop) removed`
-      : `   Codex CLI     hooks.json not found — skipping`
-  );
+    const codexJsonResult = unregisterCodexJsonHooks(home.dir);
+    console.log(
+      codexJsonResult === "removed"
+        ? `✔  Codex CLI     hooks.json (SessionEnd + SubagentStop) removed`
+        : `   Codex CLI     hooks.json not found — skipping`
+    );
+  }
+
+  // Clearing the registry stops the sweep from covering homes the user has
+  // just opted out of. Discovery still re-finds the defaults on next install.
+  saveAgentHomes({ version: 1, homes: [] });
 
   console.log("\nDone.");
 }

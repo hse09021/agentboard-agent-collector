@@ -26,6 +26,25 @@ export const CONFIG_VERSION = 2 as const;
 /** Where snapshots of the CLI's own rate-limit status are sent. */
 export type SnapshotTarget = "routed" | "default" | "off";
 
+/**
+ * Cross-agent sweep over registered agent homes.
+ *
+ * Collection is hook-driven, which leaves a hole: when an orchestrator runs one
+ * agent as the main agent and a *different* CLI as a sub-agent, that sub-agent
+ * has its own config home, and if our hooks were never installed there nothing
+ * ever fires for it. The sweep closes it — whenever any hook fires, sessions in
+ * every known agent home are collected too.
+ *
+ *   "registered" — sweep the homes in agent-homes.json: install targets, homes
+ *     observed in a hook's own CODEX_HOME / CLAUDE_CONFIG_DIR, and
+ *     deterministic orchestrator paths. The filesystem is never searched for
+ *     candidates, sessions older than the cutoff are recorded rather than
+ *     uploaded, and each session resolves its OWN route from its OWN cwd — a
+ *     session whose route has no credential is skipped, never redirected.
+ *   "off" — collect only the session whose hook fired.
+ */
+export type SweepMode = "registered" | "off";
+
 export interface ServerRef {
   api_base_url: string;
   app_base_url: string;
@@ -61,6 +80,12 @@ export interface CollectorConfigV2 {
   default_server: ServerRef;
   bindings: Binding[];
   snapshot_target: SnapshotTarget;
+  /**
+   * Deliberately absent from the downgrade mirror above: v0.6.x ignores unknown
+   * keys, so a rolled-back collector simply does not sweep — the conservative
+   * degradation, and the correct one.
+   */
+  sweep: SweepMode;
 }
 
 /** The v1 shape, for migration only. */
@@ -162,6 +187,7 @@ export function migrateV1toV2(
     default_server: defaultServer,
     bindings: [],
     snapshot_target: "routed",
+    sweep: "registered",
   };
 }
 
@@ -196,5 +222,8 @@ export function normalizeV2(raw: CollectorConfigV2): CollectorConfigV2 {
     default_server: defaultServer,
     bindings,
     snapshot_target: raw.snapshot_target ?? "routed",
+    // Anything unrecognised coerces to the documented default rather than
+    // throwing: a typo in a hand-edited config must not stop collection.
+    sweep: raw.sweep === "off" ? "off" : "registered",
   };
 }

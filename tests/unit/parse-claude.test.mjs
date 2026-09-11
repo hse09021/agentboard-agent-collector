@@ -251,6 +251,37 @@ describe('parseClaudeSession — cache-write TTL split', () => {
   });
 });
 
+describe('parseClaudeSession — cwd (routing anchor)', () => {
+  // The live hook takes cwd from its payload, but a session found by the
+  // cross-agent sweep has no payload — so the transcript has to supply it, or
+  // the session cannot be routed to the right server. Read only; never uploaded.
+  it('returns the cwd recorded on a transcript entry', () => {
+    const file = writeTmpJsonl('sess.jsonl', [
+      { ...makeAssistant(), cwd: 'C:\\work\\proj' },
+    ]);
+    expect(parseClaudeSession(file).cwd).toBe('C:\\work\\proj');
+  });
+
+  it('is undefined when the transcript records none', () => {
+    const file = writeTmpJsonl('sess.jsonl', [makeAssistant()]);
+    expect(parseClaudeSession(file).cwd).toBeUndefined();
+  });
+
+  it('prefers the parent transcript cwd over a subagent that ran elsewhere', () => {
+    const mainFile = writeTmpJsonl('abc123.jsonl', [
+      { ...makeAssistant({ inputTokens: 10 }), cwd: '/work/parent' },
+    ]);
+    const subagentsDir = join(tmpDir, 'abc123', 'subagents');
+    mkdirSync(subagentsDir, { recursive: true });
+    writeFileSync(
+      join(subagentsDir, 'sub1.jsonl'),
+      JSON.stringify({ ...makeAssistant({ inputTokens: 20 }), cwd: '/work/elsewhere' }) + '\n'
+    );
+
+    expect(parseClaudeSession(mainFile).cwd).toBe('/work/parent');
+  });
+});
+
 describe('parseClaudeSession — per-day buckets', () => {
   it('files each turn under the day it actually ran on', () => {
     // The bug: this session was created on 06-01, so every one of its tokens —

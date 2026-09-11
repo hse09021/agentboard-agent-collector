@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -143,6 +143,73 @@ describe('listAgentHomes', () => {
     await reimport();
 
     expect(mod.listAgentHomes('codex').filter((h) => h.dir.includes('orca-codex'))).toHaveLength(1);
+  });
+});
+
+describe('Orca managed account homes', () => {
+  // Orca stores each hot-swapped account under <userData>/<agent>-accounts/<id>/
+  // and points CODEX_HOME / CLAUDE_CONFIG_DIR at it, so that account's settings
+  // and transcripts never land under ~/. The two agents differ in both the leaf
+  // directory and the marker file Orca writes to identify one.
+  const LAYOUT = {
+    claude_code: { dir: 'claude-accounts', leaf: 'auth', marker: '.orca-managed-claude-auth' },
+    codex: { dir: 'codex-accounts', leaf: 'home', marker: '.orca-managed-home' },
+  };
+
+  function makeAccount(kind, id, { marker = true } = {}) {
+    const l = LAYOUT[kind];
+    const home = join(homeDir, 'AppData', 'Roaming', 'Orca', l.dir, id, l.leaf);
+    mkdirSync(home, { recursive: true });
+    if (marker) writeFileSync(join(home, l.marker), id + '\n');
+    return home;
+  }
+
+  it('finds a managed Claude account and offers it for sweeping', async () => {
+    makeAccount('claude_code', 'acct-1');
+    await reimport();
+
+    expect(mod.orcaClaudeHomes()).toHaveLength(1);
+    expect(mod.listAgentHomes('claude_code').some((h) => h.origin === 'orca')).toBe(true);
+  });
+
+  it('finds a managed Codex account alongside the shared runtime home', async () => {
+    const runtime = join(homeDir, 'AppData', 'Roaming', 'Orca', 'codex-runtime-home', 'home');
+    mkdirSync(runtime, { recursive: true });
+    makeAccount('codex', 'acct-1');
+    await reimport();
+
+    expect(mod.orcaCodexHomes()).toHaveLength(2);
+  });
+
+  it('finds every configured account', async () => {
+    makeAccount('claude_code', 'acct-1');
+    makeAccount('claude_code', 'acct-2');
+    await reimport();
+
+    expect(mod.orcaClaudeHomes()).toHaveLength(2);
+  });
+
+  it('ignores a directory without the marker Orca writes', async () => {
+    makeAccount('claude_code', 'not-orca', { marker: false });
+    makeAccount('codex', 'not-orca', { marker: false });
+    await reimport();
+
+    expect(mod.orcaClaudeHomes()).toHaveLength(0);
+    expect(mod.orcaCodexHomes()).toHaveLength(0);
+  });
+
+  it('does not accept a Claude marker in a Codex account, or the reverse', async () => {
+    // The two layouts are distinct; a mixed-up marker must not qualify.
+    const codexHome = join(homeDir, 'AppData', 'Roaming', 'Orca', 'codex-accounts', 'x', 'home');
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(join(codexHome, '.orca-managed-claude-auth'), 'x\n');
+    await reimport();
+
+    expect(mod.orcaCodexHomes()).toHaveLength(0);
+  });
+
+  it('returns nothing when Orca has no managed accounts', () => {
+    expect(mod.orcaClaudeHomes()).toEqual([]);
   });
 });
 

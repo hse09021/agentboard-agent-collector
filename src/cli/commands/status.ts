@@ -7,6 +7,7 @@ import { COLLECTOR_VERSION } from "../../core/usage-event";
 import { ApiError, createApiClient } from "../../api/client";
 import { UsageSummary, UsageBySource } from "../../api/types";
 import { logger } from "../../core/logger";
+import { listAgentHomes } from "../../core/agent-homes";
 import chalk from "chalk";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -132,30 +133,35 @@ export async function statusCommand(): Promise<void> {
   logger.plain(chalk.bold("Hooks"));
   logger.plain("─".repeat(40));
 
-  const home = os.homedir();
-  const hooks: Array<{ name: string; registered: boolean }> = [
-    {
+  // One row per agent home. An orchestrator can run an agent against a
+  // relocated CODEX_HOME / CLAUDE_CONFIG_DIR, and whether our hooks are in THAT
+  // home's settings file is what decides whether it gets collected.
+  const hooks: Array<{ name: string; dir: string; origin: string; registered: boolean }> = [
+    ...listAgentHomes("claude_code").map((h) => ({
       name: "Claude Code",
-      registered: isHookRegistered(
-        path.join(home, ".claude", "settings.json"),
-        (c) => c.includes("agentboard")
+      dir: h.dir,
+      origin: h.origin,
+      registered: isHookRegistered(path.join(h.dir, "settings.json"), (c) =>
+        c.includes("agentboard")
       ),
-    },
-    {
+    })),
+    ...listAgentHomes("codex").map((h) => ({
       name: "Codex CLI  ",
-      registered: isHookRegistered(
-        path.join(home, ".codex", "config.toml"),
-        (c) => c.includes("agentboard")
+      dir: h.dir,
+      origin: h.origin,
+      registered: isHookRegistered(path.join(h.dir, "config.toml"), (c) =>
+        c.includes("agentboard")
       ),
-    },
+    })),
   ];
 
-  for (const { name, registered } of hooks) {
+  for (const { name, dir, origin, registered } of hooks) {
     const icon = registered ? chalk.green("✔") : chalk.dim("○");
     const label = registered
       ? chalk.green("Registered")
-      : chalk.dim("Not registered");
-    logger.plain(`  ${icon}  ${name}  ${label}`);
+      : chalk.dim("Not registered — sweep only");
+    const where = origin === "default" ? "" : chalk.dim(`  ${dir} [${origin}]`);
+    logger.plain(`  ${icon}  ${name}  ${label}${where}`);
   }
 
   const anyRegistered = hooks.some((h) => h.registered);

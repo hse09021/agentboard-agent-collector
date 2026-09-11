@@ -56,6 +56,8 @@ import {
   COLLECTOR_VERSION,
 } from '../lib/config.mjs';
 import { resolveRoute } from '../lib/routing.mjs';
+import { recordAgentHomesFromEnv } from '../lib/agent-homes.mjs';
+import { isSweepEnabled, maybeSpawnSweep } from '../lib/sweep.mjs';
 import { splitSessionDelta, sumPieceTokens } from '../lib/daily-split.mjs';
 import { uploadEvents, registerDevice } from '../lib/transport.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
@@ -119,8 +121,6 @@ function buildUsageOnlyEvent(deviceId, source, sessionId) {
   const now = new Date().toISOString();
   return {
     schema_version: '1.0',
-    // Random, unlike a token event: a rate-limit reading is a fresh observation
-    // each time it is taken, not a re-report of the same thing.
     event_id: generateEventId(),
     device_id: deviceId,
     source,
@@ -183,6 +183,26 @@ async function main() {
   if (!config) {
     workerLog('SKIP: no config');
     process.exit(0);
+  }
+
+  // 2.5 Cross-agent collection.
+  //
+  // This process descends from the Claude Code that spawned it, so it inherits
+  // that instance's CLAUDE_CONFIG_DIR — recording it is how an orchestrator-
+  // relocated home becomes known.
+  //
+  // The sweep then runs detached, so it costs this worker nothing. It is what
+  // collects a sub-agent running a *different* CLI: that CLI may have no
+  // agentboard hooks in its own home and so never fires anything, but this hook
+  // fires every turn, and the sweep picks up its sessions. Throttled inside;
+  // forced on SessionEnd so the last turn's work is not left for later.
+  recordAgentHomesFromEnv();
+  if (isSweepEnabled(config)) {
+    maybeSpawnSweep({
+      source: 'claude_code',
+      sessionId: payload.session_id ?? payload.sessionId,
+      force: payload.hook_event_name === 'SessionEnd',
+    });
   }
 
   // 3. Detect source

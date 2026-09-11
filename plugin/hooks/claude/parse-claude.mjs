@@ -47,6 +47,11 @@ function parseSingleFile(filePath) {
   let model;
   let startedAt;
   let endedAt;
+  // Routing anchor. The hook payload carries `cwd` for the live session, but a
+  // session discovered by the cross-agent sweep has no payload — so the working
+  // directory has to come from the transcript itself. Read only to pick a
+  // destination server; never uploaded.
+  let cwd;
   // Per-day buckets so a session resumed on a later day reports that day's
   // tokens under that day, not under the session's creation date.
   const dayBuckets = new Map();
@@ -59,6 +64,9 @@ function parseSingleFile(filePath) {
     } catch {
       continue;
     }
+
+    // Present on user/assistant entries (not on the leading operation entry).
+    if (!cwd && typeof parsed.cwd === 'string' && parsed.cwd) cwd = parsed.cwd;
 
     const ts = toIso(parsed.timestamp);
     if (ts) {
@@ -118,6 +126,7 @@ function parseSingleFile(filePath) {
     cacheCreation1hTokens,
     cacheReadTokens,
     model,
+    cwd,
     startedAt,
     endedAt,
     byDate: sortDayBuckets(dayBuckets),
@@ -148,6 +157,7 @@ export function parseClaudeSession(transcriptPath) {
   let cacheCreation1hTokens = 0;
   let cacheReadTokens = 0;
   let model;
+  let cwd;
   let startedAt;
   let endedAt;
   let hasAny = false;
@@ -164,6 +174,10 @@ export function parseClaudeSession(transcriptPath) {
     cacheCreation1hTokens += r.cacheCreation1hTokens;
     cacheReadTokens += r.cacheReadTokens;
     if (!model && r.model) model = r.model;
+    // filePaths[0] is the parent transcript, so first-wins takes the parent's
+    // cwd. A subagent can run somewhere else entirely, and the session belongs
+    // to where the parent was working.
+    if (!cwd && r.cwd) cwd = r.cwd;
     if (r.startedAt && (!startedAt || r.startedAt < startedAt)) startedAt = r.startedAt;
     if (r.endedAt && (!endedAt || r.endedAt > endedAt)) endedAt = r.endedAt;
     // A subagent's tokens belong to the day they ran on, same as the parent's.
@@ -184,6 +198,7 @@ export function parseClaudeSession(transcriptPath) {
     cacheReadTokens,
     totalTokens,
     model,
+    cwd,
     startedAt: startedAt ?? new Date().toISOString(),
     endedAt,
     byDate,

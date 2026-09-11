@@ -72,6 +72,12 @@ program
     "Register real-time session hooks with Claude Code and Codex CLI"
   )
   .option("--force", "Re-register even if hooks already exist")
+  .option(
+    "--home <dir>",
+    "Additional agent config home to install into (repeatable)",
+    (value: string, previous: string[] = []) => previous.concat(value)
+  )
+  .option("--only-default-home", "Install only into ~/.claude and ~/.codex")
   .action(async (options) => {
     const { installHooksCommand } = await import("./commands/install-hooks");
     await installHooksCommand(options);
@@ -83,6 +89,15 @@ program
   .action(async () => {
     const { uninstallHooksCommand } = await import("./commands/install-hooks");
     await uninstallHooksCommand();
+  });
+
+program
+  .command("sweep")
+  .description("Show or change cross-agent sweep coverage (on by default)")
+  .argument("[mode]", "on | off — omit to show the current setting")
+  .action(async (mode?: string) => {
+    const { sweepCommand } = await import("./commands/sweep");
+    await sweepCommand(mode);
   });
 
 program.parseAsync(process.argv).catch((err) => {

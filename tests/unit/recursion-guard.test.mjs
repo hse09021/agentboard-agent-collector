@@ -100,6 +100,16 @@ describe('AGENTBOARD_INTERNAL recursion guard', () => {
     expect(code).toBe(0);
   });
 
+  it('sweep/run.mjs exits 0 and does nothing when the flag is set', async () => {
+    // The sweep reaches sessions no hook announced, so it is exactly the thing
+    // that would collect the ghost session `claude -p /usage` creates.
+    const { code } = await runHook('sweep/run.mjs', {
+      env: { AGENTBOARD_INTERNAL: '1', APPDATA: appData },
+    });
+    expect(code).toBe(0);
+    expect(debugLog()).not.toContain('[sweep]');
+  });
+
   it('codex/subagent-stop.mjs exits 0 and self-skips when the flag is set', async () => {
     const { code } = await runHook('codex/subagent-stop.mjs', {
       env: { AGENTBOARD_INTERNAL: '1' },

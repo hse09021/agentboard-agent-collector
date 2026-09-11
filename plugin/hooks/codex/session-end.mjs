@@ -36,6 +36,8 @@ import { uploadEvents } from '../lib/transport.mjs';
 import { resolveUploadContext } from '../lib/upload-context.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
 import { readStdin } from '../lib/read-stdin.mjs';
+import { recordAgentHomesFromEnv } from '../lib/agent-homes.mjs';
+import { isSweepEnabled, maybeSpawnSweep } from '../lib/sweep.mjs';
 
 async function main() {
   if (process.env.AGENTBOARD_INTERNAL === '1') process.exit(0);
@@ -56,6 +58,15 @@ async function main() {
 
   const sessionId = payload.session_id ?? payload.sessionId;
   if (!sessionId) process.exit(0);
+
+  // Session end is the one moment worth bypassing the sweep throttle: whatever
+  // a differently-homed sub-agent produced during this session should land now
+  // rather than wait for the next hook on some future turn. Forced here for the
+  // same reason the rate-limit snapshot below uses minIntervalMs: 0.
+  recordAgentHomesFromEnv();
+  if (isSweepEnabled(loadConfigV2())) {
+    maybeSpawnSweep({ source: 'codex', sessionId, force: true });
+  }
 
   // The route (and therefore the credential) depends on the working directory,
   // which the hook payload carries. Resolved here so every later step uses the
