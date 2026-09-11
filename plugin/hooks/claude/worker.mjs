@@ -48,6 +48,7 @@ import {
   loadRouteCredential,
   getSentRoute,
   generateEventId,
+  deriveEventId,
   getSentTotals,
   markTotalsSent,
   acquireSessionLock,
@@ -85,10 +86,12 @@ function detectSource(payload) {
 // One event per calendar day of the delta. `piece.startedAt` falls inside
 // `piece.date`, which is what makes the server file these tokens under the day
 // they were actually spent rather than under the session's creation date.
-function buildUsageEvent(deviceId, source, sessionId, model, piece) {
+function buildUsageEvent(deviceId, source, sessionId, model, piece, alreadySent) {
   return {
     schema_version: '1.0',
-    event_id: generateEventId(),
+    // Deterministic, so the server's (user_id, event_id) uniqueness can absorb
+    // a racing hook or a retry after an ambiguous failure.
+    event_id: deriveEventId(source, sessionId, piece, alreadySent),
     device_id: deviceId,
     source,
     model,
@@ -116,6 +119,8 @@ function buildUsageOnlyEvent(deviceId, source, sessionId) {
   const now = new Date().toISOString();
   return {
     schema_version: '1.0',
+    // Random, unlike a token event: a rate-limit reading is a fresh observation
+    // each time it is taken, not a re-report of the same thing.
     event_id: generateEventId(),
     device_id: deviceId,
     source,
@@ -258,8 +263,11 @@ async function main() {
   // `cumulative` is kept as the figure to persist afterwards.
   const cumulative = parsed;
   let pieces = [];
+  // Read once, outside the branch: the watermark this delta was computed
+  // against is part of what makes each event's id deterministic, so the event
+  // builder below needs the same value.
+  const alreadySent = getSentTotals(source, sessionId);
   if (parsed) {
-    const alreadySent = getSentTotals(source, sessionId);
     pieces = splitSessionDelta(parsed, alreadySent);
     workerLog(
       `delta totalTokens=${sumPieceTokens(pieces)} across ${pieces.length} day(s) ` +
@@ -300,7 +308,7 @@ async function main() {
   // shows up as one session on each of them rather than as two sessions.
   const events = hasTokens
     ? pieces.map((piece) =>
-        buildUsageEvent(deviceId, source, sessionId, cumulative.model, piece)
+        buildUsageEvent(deviceId, source, sessionId, cumulative.model, piece, alreadySent)
       )
     : [buildUsageOnlyEvent(deviceId, source, sessionId)];
 

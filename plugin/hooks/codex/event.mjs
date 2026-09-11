@@ -7,7 +7,7 @@
  * claude/worker.mjs.
  */
 
-import { generateEventId, COLLECTOR_VERSION } from '../lib/config.mjs';
+import { generateEventId, deriveEventId, COLLECTOR_VERSION } from '../lib/config.mjs';
 
 // A codex UsageEvent carrying one calendar day's slice of a token delta. Used
 // for per-turn notify uploads, the SessionEnd residue sweep, and subagent-stop
@@ -18,10 +18,12 @@ import { generateEventId, COLLECTOR_VERSION } from '../lib/config.mjs';
 // file these tokens under the day they were actually spent rather than under
 // the thread's creation date — a thread started yesterday and resumed today
 // used to report all of today's tokens with yesterday's `started_at`.
-export function buildUsageEvent(deviceId, sessionId, model, piece) {
+export function buildUsageEvent(deviceId, sessionId, model, piece, alreadySent) {
   return {
     schema_version: '1.0',
-    event_id: generateEventId(),
+    // Deterministic, so the server's (user_id, event_id) uniqueness can absorb
+    // a racing notify or a retry after an ambiguous failure. See deriveEventId.
+    event_id: deriveEventId('codex', sessionId, piece, alreadySent),
     device_id: deviceId,
     source: 'codex',
     model,

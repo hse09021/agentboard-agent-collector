@@ -15,7 +15,7 @@ import {
 import { join } from 'node:path';
 import { writeJsonAtomic } from './atomic-write.mjs';
 import { homedir } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 // Re-exported so hook modules keep importing the version from here.
 // The value itself is generated from package.json by scripts/generate-version.mjs
@@ -394,4 +394,64 @@ export function releaseSessionLock(source, sessionId) {
 
 export function generateEventId() {
   return `evt_${randomUUID().replace(/-/g, '')}`;
+}
+
+/**
+ * A deterministic event id for a token upload.
+ *
+ * The server dedups on (user_id, event_id). Because every upload used to carry
+ * a fresh random id, it could not — which is exactly what the session-lock
+ * comment above says, and why correctness rested entirely on that lock.
+ *
+ * The id is derived from what uniquely identifies this upload: the session, the
+ * calendar day, the watermark it was computed against, and the amounts. Two
+ * invocations that read the same ledger and parse the same file necessarily
+ * produce the same id, so:
+ *
+ *   - two hooks racing on one session now collapse into one accepted event and
+ *     one `duplicate` server-side, instead of double-counting when the lock is
+ *     missed. The lock becomes an optimisation rather than a correctness
+ *     requirement.
+ *   - a retry after an ambiguous failure (upload landed, ledger write did not)
+ *     is safe, because it recomputes the identical id.
+ *
+ * What it does NOT fix, and is not meant to: a lost or pruned ledger. That
+ * changes the watermark, so the recomputed delta is a different upload and
+ * legitimately gets a different id. Fixing that would mean uploading one event
+ * per turn, which multiplies stored rows for every user — the wrong trade
+ * against "store the minimum".
+ *
+ * @param {string} source
+ * @param {string} sessionId
+ * @param {{date?: string, inputTokens?: number, outputTokens?: number,
+ *          cacheCreationTokens?: number, cacheReadTokens?: number,
+ *          totalTokens?: number}} piece the day-slice being uploaded
+ * @param {object} alreadySent cumulative totals this delta was computed against
+ */
+export function deriveEventId(source, sessionId, piece, alreadySent) {
+  const sent = normalizeTotals(alreadySent);
+  const amounts = [
+    piece?.inputTokens,
+    piece?.outputTokens,
+    piece?.cacheCreationTokens,
+    piece?.cacheCreation5mTokens,
+    piece?.cacheCreation1hTokens,
+    piece?.cacheReadTokens,
+    piece?.totalTokens,
+  ].map((v) => (Number.isFinite(v) ? Math.floor(v) : 0));
+
+  const material = [
+    'v1',
+    source,
+    sessionId,
+    piece?.date ?? '',
+    sent.inputTokens,
+    sent.outputTokens,
+    sent.cacheCreationTokens,
+    sent.cacheReadTokens,
+    sent.totalTokens,
+    ...amounts,
+  ].join('|');
+
+  return `evt_${createHash('sha256').update(material).digest('hex').slice(0, 32)}`;
 }

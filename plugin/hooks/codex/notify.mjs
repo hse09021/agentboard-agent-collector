@@ -162,8 +162,10 @@ async function main() {
   // parsed at all, there's no delta to compute — fall through to the
   // usage-snapshot-only path below.
   let pieces = [];
+  // Read outside the branch: the watermark this delta was computed against is
+  // part of what makes each event's id deterministic.
+  const alreadySent = getSentTotals('codex', sessionId);
   if (parsed && parsed.totalTokens > 0) {
-    const alreadySent = getSentTotals('codex', sessionId);
     pieces = splitSessionDelta(parsed, alreadySent);
   }
   const hasTokens = pieces.length > 0;
@@ -186,7 +188,7 @@ async function main() {
   // distinct session ids per bucket, so this stays one session per day rather
   // than becoming several sessions.
   const events = hasTokens
-    ? pieces.map((piece) => buildUsageEvent(deviceId, sessionId, parsed.model, piece))
+    ? pieces.map((piece) => buildUsageEvent(deviceId, sessionId, parsed.model, piece, alreadySent))
     : [buildUsageOnlyEvent(deviceId, sessionId)];
   // The snapshot is a point-in-time rate-limit reading, not per-day data —
   // attach it to the most recent event only.

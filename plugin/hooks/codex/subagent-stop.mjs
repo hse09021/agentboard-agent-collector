@@ -99,7 +99,7 @@ async function main() {
   // Uploaded under the PARENT session id so the subagent's tokens roll into
   // that session rather than spawning a phantom one.
   const events = pieces.map((piece) =>
-    buildUsageEvent(deviceId, parentSessionId, parsed.model, piece)
+    buildUsageEvent(deviceId, parentSessionId, parsed.model, piece, alreadySent)
   );
 
   try {

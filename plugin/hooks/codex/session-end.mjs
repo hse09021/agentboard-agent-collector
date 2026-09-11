@@ -94,9 +94,17 @@ async function main() {
   //    drops legitimate tokens.
   let parsed = null;
   let pieces = [];
+  // Declared out here only so the event builder can reuse the exact watermark
+  // this delta was computed against (it is part of the deterministic event id).
+  // The READ stays inside the lock: taking the lock first is what guarantees a
+  // concurrent notify has not advanced the ledger between the read and the
+  // upload — reading it earlier would reintroduce that race. Losing the lock
+  // leaves this null, and also leaves `pieces` empty, so no event is ever built
+  // from it.
+  let alreadySent = null;
   if (acquireSessionLock('codex', sessionId)) {
     process.on('exit', () => releaseSessionLock('codex', sessionId));
-    const alreadySent = getSentTotals('codex', sessionId);
+    alreadySent = getSentTotals('codex', sessionId);
     if (alreadySent.totalTokens > 0) {
       parsed = parseCodexSession(sessionId);
       if (parsed && parsed.totalTokens > 0) {
@@ -111,7 +119,7 @@ async function main() {
   if (!hasTokens && !usageSnapshot) process.exit(0);
 
   const events = hasTokens
-    ? pieces.map((piece) => buildUsageEvent(deviceId, sessionId, parsed.model, piece))
+    ? pieces.map((piece) => buildUsageEvent(deviceId, sessionId, parsed.model, piece, alreadySent))
     : [buildUsageOnlyEvent(deviceId, sessionId)];
   // Point-in-time rate-limit reading — most recent event only.
   if (usageSnapshot) {
