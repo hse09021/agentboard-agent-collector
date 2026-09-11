@@ -134,8 +134,12 @@ function readClaudeKeychainCredentials(
  * @returns {string|undefined}
  */
 export function readClaudeSubscriptionPlan(opts = {}) {
-  const credentialsPath =
-    opts.credentialsPath ?? join(homedir(), '.claude', '.credentials.json');
+  // CLAUDE_CONFIG_DIR, not homedir(), when the agent that spawned this hook was
+  // launched against a relocated home. Orchestrators do exactly that to hot-swap
+  // accounts, and reading ~/.claude there reports a DIFFERENT account's plan —
+  // which then feeds the plan recommendation and quietly makes it wrong.
+  const claudeHome = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), '.claude');
+  const credentialsPath = opts.credentialsPath ?? join(claudeHome, '.credentials.json');
 
   try {
     const planName = planFromCredentialsJson(readFileSync(credentialsPath, 'utf-8'));

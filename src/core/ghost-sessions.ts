@@ -19,6 +19,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { getClaudeProjectsDirs as registeredClaudeProjectsDirs } from "./agent-homes";
 
 export interface GhostSession {
   filePath: string;
@@ -40,6 +41,22 @@ export function getClaudeProjectsDir(): string {
     return path.join(process.env.AGENTBOARD_CLAUDE_DIR, "projects");
   }
   return path.join(os.homedir(), ".claude", "projects");
+}
+
+/**
+ * Every projects directory worth scanning for ghosts.
+ *
+ * Claude Code honours CLAUDE_CONFIG_DIR and orchestrators relocate it, so the
+ * `/usage` transcripts this cleans up can land outside ~/.claude. Cosmetic
+ * either way — a missed ghost clutters the /resume picker, it never costs
+ * tokens — but there is no reason to only half-clean.
+ */
+export function getClaudeProjectsDirs(): string[] {
+  if (process.env.AGENTBOARD_CLAUDE_DIR) {
+    return [path.join(process.env.AGENTBOARD_CLAUDE_DIR, "projects")];
+  }
+  const dirs = registeredClaudeProjectsDirs();
+  return dirs.length > 0 ? dirs : [getClaudeProjectsDir()];
 }
 
 /**
@@ -91,6 +108,18 @@ export function isGhostTranscript(content: string): boolean {
   }
 
   return sawUsageCommand && sawLocalCommand;
+}
+
+/** Scans every registered Claude home. Kept separate so the single-dir form
+ *  below stays the simple, directly testable unit. */
+export function scanAllGhostSessions(dirs = getClaudeProjectsDirs()): GhostScanResult {
+  const results = dirs.map((dir) => scanGhostSessions(dir));
+  return {
+    ghosts: results.flatMap((r) => r.ghosts),
+    keptCount: results.reduce((n, r) => n + r.keptCount, 0),
+    // Only "missing" when nothing anywhere was scannable.
+    missingRoot: results.every((r) => r.missingRoot),
+  };
 }
 
 export function scanGhostSessions(
