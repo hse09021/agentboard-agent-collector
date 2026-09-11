@@ -14,11 +14,8 @@
  * short delay before giving up.
  */
 
-import {
-  parseCodexFile,
-  findCodexSessionFile,
-  findLatestCodexSessionFile,
-} from './parse-codex.mjs';
+import { parseCodexFile, findCodexSessionFile } from './parse-codex.mjs';
+import { recordAgentHomesFromEnv } from '../lib/agent-homes.mjs';
 import { buildUsageEvent, buildUsageOnlyEvent } from './event.mjs';
 import {
   loadConfigV2,
@@ -94,18 +91,26 @@ async function main() {
     process.exit(0);
   }
 
+  // This process was spawned by the Codex that is running, so it inherits that
+  // Codex's CODEX_HOME. Recording it is what makes an orchestrator-launched
+  // agent (Orca points CODEX_HOME at its own runtime home) discoverable later.
+  recordAgentHomesFromEnv();
+
   // One in-flight upload per thread. Notify fires per turn, and a slow run
   // (retry loop + upload) can still be going when the next turn's notify
   // starts; both would read the same sent-totals and upload overlapping
-  // deltas. The lock is keyed on the notify payload's thread id — a losing
-  // invocation exits and its tokens ride along in the next turn's delta.
-  // Pinned to a const because `sessionId` may be reassigned below (latest-
-  // session fallback), and release must use the exact key that was acquired.
-  const lockSessionId = sessionId;
-  if (!acquireSessionLock('codex', lockSessionId)) {
+  // deltas. A losing invocation exits and its tokens ride along in the next
+  // turn's delta.
+  //
+  // `sessionId` is never reassigned after this point, so the lock key, the
+  // ledger key and the uploaded session_id are one and the same value. They
+  // used to diverge: the lock was taken on the payload thread id while the
+  // ledger was keyed on an id adopted from whatever file got parsed, so in
+  // exactly the case where they differed the lock guarded the wrong key.
+  if (!acquireSessionLock('codex', sessionId)) {
     process.exit(0);
   }
-  process.on('exit', () => releaseSessionLock('codex', lockSessionId));
+  process.on('exit', () => releaseSessionLock('codex', sessionId));
 
   // Run best-effort, throttled rate-limit capture concurrently with the
   // token-parse retry loop below — never lets a slow/failed CLI call delay
@@ -126,23 +131,23 @@ async function main() {
 
   // The retry loop exists because codex may not have flushed the turn's tokens
   // yet — only the file's CONTENTS change across attempts, not which file it is.
-  // So resolve the path instead of re-parsing via a fresh tree walk each time:
-  //  - `findCodexSessionFile` (walk-by-name) is retried only until the id-matched
-  //    file exists (a brand-new session file can appear a beat late), then cached.
-  //  - the latest-session fallback (`findLatestCodexSessionFile`, which stat()s
-  //    every file) is computed at most once, not every attempt.
+  // So resolve the path once and re-read it, rather than re-walking the tree:
+  // `findCodexSessionFile` (walk-by-name, across every Codex home) is retried
+  // only until the id-matched file exists — a brand-new rollout can appear a
+  // beat late — and then cached.
+  //
+  // There is deliberately no "newest file anywhere" fallback. It existed for
+  // Codex builds whose notify thread-id does not map to the rollout filename,
+  // but what it actually did was hand this hook an unrelated session: the
+  // parsed id was then adopted as `sessionId`, so another thread's ledger entry
+  // was diffed against this file and the result routed to that thread's server.
+  // A session we cannot identify is now simply left alone — the cross-agent
+  // sweep collects it later, with its own id, its own cwd and its own route.
   let sessionFile = null; // id-matched file, once found
-  let latestFallback; // undefined = not yet computed; null = computed, none found
   let parsed = null;
   for (let attempt = 0; attempt < RETRY_MAX; attempt++) {
     if (!sessionFile) sessionFile = findCodexSessionFile(sessionId);
-    let fileToParse = sessionFile;
-    if (!fileToParse) {
-      if (latestFallback === undefined) latestFallback = findLatestCodexSessionFile();
-      fileToParse = latestFallback;
-    }
-    parsed = fileToParse ? parseCodexFile(fileToParse) : null;
-    if (parsed?.sessionId) sessionId = parsed.sessionId;
+    parsed = sessionFile ? parseCodexFile(sessionFile) : null;
     if (parsed && parsed.totalTokens > 0) break;
     if (attempt < RETRY_MAX - 1) await sleep(RETRY_DELAY_MS);
   }
@@ -158,7 +163,6 @@ async function main() {
   // usage-snapshot-only path below.
   let pieces = [];
   if (parsed && parsed.totalTokens > 0) {
-    if (parsed.sessionId) sessionId = parsed.sessionId;
     const alreadySent = getSentTotals('codex', sessionId);
     pieces = splitSessionDelta(parsed, alreadySent);
   }

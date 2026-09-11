@@ -4,12 +4,18 @@
  * Privacy: only reads token_count event payloads and model names.
  * Never accesses text content of conversation turns.
  *
- * Session files live at: ~/.codex/sessions/YYYY/MM/DD/{sessionId}.jsonl
+ * Session files live at: <codex home>/sessions/YYYY/MM/DD/{sessionId}.jsonl
+ *
+ * The home is NOT always ~/.codex. Codex honours CODEX_HOME, and agent
+ * orchestrators use it: Orca runs Codex with CODEX_HOME pointed at its own
+ * runtime home, so the rollouts land there and nowhere near ~/.codex. Resolving
+ * this against homedir() alone was why Codex usage went uncollected inside
+ * Orca — see lib/agent-homes.mjs.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { getCodexSessionsDirs } from '../lib/agent-homes.mjs';
 import { addToDayBucket, sortDayBuckets } from '../lib/daily-split.mjs';
 
 function toNN(v) {
@@ -24,10 +30,6 @@ function toIso(v) {
     if (!isNaN(d.getTime())) return d.toISOString();
   }
   return null;
-}
-
-function getCodexSessionsDir() {
-  return join(homedir(), '.codex', 'sessions');
 }
 
 function searchDir(dir, sessionId) {
@@ -50,48 +52,25 @@ function searchDir(dir, sessionId) {
   return null;
 }
 
+/**
+ * Locate a rollout by session id across every Codex home this machine has.
+ *
+ * Searched most-specific first, so a hook running inside an orchestrator-
+ * launched Codex matches in its own CODEX_HOME on the first directory and
+ * never walks ~/.codex at all.
+ *
+ * Returns null when no home holds a file for this id. That is the honest
+ * answer, and callers must treat it as such — the previous behaviour, falling
+ * back to "the newest rollout anywhere", handed the caller a stranger's session
+ * whose tokens then got charged against the wrong ledger entry and routed to
+ * whichever server that other session belonged to.
+ */
 export function findCodexSessionFile(sessionId) {
-  const sessionsDir = getCodexSessionsDir();
-  if (!existsSync(sessionsDir)) return null;
-  return searchDir(sessionsDir, sessionId);
-}
-
-function collectSessionFiles(dir, out = []) {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return out;
+  for (const sessionsDir of getCodexSessionsDirs()) {
+    const found = searchDir(sessionsDir, sessionId);
+    if (found) return found;
   }
-
-  for (const entry of entries) {
-    const fullPath = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      collectSessionFiles(fullPath, out);
-    } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
-      out.push(fullPath);
-    }
-  }
-  return out;
-}
-
-export function findLatestCodexSessionFile() {
-  const sessionsDir = getCodexSessionsDir();
-  if (!existsSync(sessionsDir)) return null;
-
-  let latest = null;
-  for (const filePath of collectSessionFiles(sessionsDir)) {
-    let mtimeMs = 0;
-    try {
-      mtimeMs = statSync(filePath).mtimeMs;
-    } catch {
-      continue;
-    }
-    if (!latest || mtimeMs > latest.mtimeMs) {
-      latest = { filePath, mtimeMs };
-    }
-  }
-  return latest?.filePath ?? null;
+  return null;
 }
 
 function parseUsageObject(usageObj) {
@@ -262,17 +241,6 @@ export function parseCodexFile(filePath) {
  */
 export function parseCodexSession(sessionId) {
   const filePath = findCodexSessionFile(sessionId);
-  if (!filePath) return null;
-  return parseCodexFile(filePath);
-}
-
-/**
- * Parse the most recently modified Codex session JSONL file.
- * Used as a fallback for Codex notify payloads whose ID does not map to
- * the persisted session filename in newer CLI versions.
- */
-export function parseLatestCodexSession() {
-  const filePath = findLatestCodexSessionFile();
   if (!filePath) return null;
   return parseCodexFile(filePath);
 }
