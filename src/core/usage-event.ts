@@ -41,6 +41,14 @@ export interface UsageEvent {
   input_tokens?: number;
   output_tokens?: number;
   cache_creation_tokens?: number;
+  /**
+   * TTL breakdown OF cache_creation_tokens — never added to it, and never part
+   * of total_tokens. Anthropic prices a 5-minute cache write at 1.25x the input
+   * rate and a 1-hour write at 2x, so without the split a cache-heavy session
+   * cannot be costed. Claude Code only; Codex has no cache-write concept.
+   */
+  cache_creation_5m_tokens?: number;
+  cache_creation_1h_tokens?: number;
   cache_read_tokens?: number;
   total_tokens: number;
   estimated_cost_usd?: number;

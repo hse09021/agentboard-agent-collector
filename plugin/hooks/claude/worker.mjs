@@ -98,6 +98,11 @@ function buildUsageEvent(deviceId, source, sessionId, model, piece) {
     input_tokens: piece.inputTokens,
     output_tokens: piece.outputTokens,
     cache_creation_tokens: piece.cacheCreationTokens ?? 0,
+    // Breakdown of cache_creation_tokens by TTL, not additional tokens. The two
+    // are priced differently (5-minute writes at 1.25x input, 1-hour at 2x), so
+    // the server needs the split to cost a cache-heavy session at all.
+    cache_creation_5m_tokens: piece.cacheCreation5mTokens ?? 0,
+    cache_creation_1h_tokens: piece.cacheCreation1hTokens ?? 0,
     cache_read_tokens: piece.cacheReadTokens,
     total_tokens: piece.totalTokens,
     collector_version: COLLECTOR_VERSION,

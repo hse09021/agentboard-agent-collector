@@ -237,10 +237,17 @@ export function markSessionSent(source, sessionId) {
 // first invocation and drops everything after it. So both sources instead store
 // the cumulative totals already uploaded and send only the delta each time.
 
+// cacheCreation5m/1h are a breakdown of cacheCreationTokens, not extra tokens;
+// they never enter totalTokens. Ledger records written before this field pair
+// existed simply read as 0, which makes the first post-upgrade delta report the
+// whole split — the server clamps that against cacheCreationTokens rather than
+// trusting it (see cost-estimator).
 const ZERO_TOTALS = {
   inputTokens: 0,
   outputTokens: 0,
   cacheCreationTokens: 0,
+  cacheCreation5mTokens: 0,
+  cacheCreation1hTokens: 0,
   cacheReadTokens: 0,
   totalTokens: 0,
 };
@@ -255,6 +262,8 @@ function normalizeTotals(totals) {
     inputTokens: nn(totals.inputTokens),
     outputTokens: nn(totals.outputTokens),
     cacheCreationTokens: nn(totals.cacheCreationTokens),
+    cacheCreation5mTokens: nn(totals.cacheCreation5mTokens),
+    cacheCreation1hTokens: nn(totals.cacheCreation1hTokens),
     cacheReadTokens: nn(totals.cacheReadTokens),
     totalTokens: nn(totals.totalTokens),
   };
@@ -319,6 +328,8 @@ export function computeDelta(cumulative, alreadySent) {
     inputTokens: sub(cur.inputTokens, prev.inputTokens),
     outputTokens: sub(cur.outputTokens, prev.outputTokens),
     cacheCreationTokens: sub(cur.cacheCreationTokens, prev.cacheCreationTokens),
+    cacheCreation5mTokens: sub(cur.cacheCreation5mTokens, prev.cacheCreation5mTokens),
+    cacheCreation1hTokens: sub(cur.cacheCreation1hTokens, prev.cacheCreation1hTokens),
     cacheReadTokens: sub(cur.cacheReadTokens, prev.cacheReadTokens),
     totalTokens: sub(cur.totalTokens, prev.totalTokens),
   };

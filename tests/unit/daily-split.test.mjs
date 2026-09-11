@@ -17,11 +17,16 @@ import {
   TOKEN_FIELDS,
 } from '../../plugin/hooks/lib/daily-split.mjs';
 
-function turn(input, output, cacheCreation = 0, cacheRead = 0) {
+function turn(input, output, cacheCreation = 0, cacheRead = 0, cc5 = 0, cc1h = 0) {
   return {
     inputTokens: input,
     outputTokens: output,
     cacheCreationTokens: cacheCreation,
+    // TTL breakdown of cacheCreationTokens (5-minute writes bill at 1.25x
+    // input, 1-hour at 2x). Split across days like every other field, but
+    // deliberately absent from totalTokens — it is not extra usage.
+    cacheCreation5mTokens: cc5,
+    cacheCreation1hTokens: cc1h,
     cacheReadTokens: cacheRead,
     totalTokens: input + output + cacheCreation + cacheRead,
   };

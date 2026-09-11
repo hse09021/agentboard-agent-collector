@@ -41,6 +41,8 @@ function parseSingleFile(filePath) {
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheCreationTokens = 0;
+  let cacheCreation5mTokens = 0;
+  let cacheCreation1hTokens = 0;
   let cacheReadTokens = 0;
   let model;
   let startedAt;
@@ -77,10 +79,20 @@ function parseSingleFile(filePath) {
     const usage = msg.usage;
     if (!usage || typeof usage !== 'object') continue;
 
+    // Anthropic bills the two cache-write TTLs at different multiples of the
+    // input price (5-minute writes at 1.25x, 1-hour at 2x), and reports the
+    // split under `usage.cache_creation`. Collapsing them into one number is
+    // why cache-heavy sessions could not be costed correctly. These are a
+    // BREAKDOWN of cacheCreationTokens — never added to the total.
+    const cacheCreation =
+      usage.cache_creation && typeof usage.cache_creation === 'object' ? usage.cache_creation : {};
+
     const turn = {
       inputTokens: toNN(usage.input_tokens),
       outputTokens: toNN(usage.output_tokens),
       cacheCreationTokens: toNN(usage.cache_creation_input_tokens),
+      cacheCreation5mTokens: toNN(cacheCreation.ephemeral_5m_input_tokens),
+      cacheCreation1hTokens: toNN(cacheCreation.ephemeral_1h_input_tokens),
       cacheReadTokens: toNN(usage.cache_read_input_tokens),
     };
     turn.totalTokens =
@@ -89,6 +101,8 @@ function parseSingleFile(filePath) {
     inputTokens += turn.inputTokens;
     outputTokens += turn.outputTokens;
     cacheCreationTokens += turn.cacheCreationTokens;
+    cacheCreation5mTokens += turn.cacheCreation5mTokens;
+    cacheCreation1hTokens += turn.cacheCreation1hTokens;
     cacheReadTokens += turn.cacheReadTokens;
 
     // An entry without its own timestamp falls back to the last one seen, so it
@@ -100,6 +114,8 @@ function parseSingleFile(filePath) {
     inputTokens,
     outputTokens,
     cacheCreationTokens,
+    cacheCreation5mTokens,
+    cacheCreation1hTokens,
     cacheReadTokens,
     model,
     startedAt,
@@ -128,6 +144,8 @@ export function parseClaudeSession(transcriptPath) {
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheCreationTokens = 0;
+  let cacheCreation5mTokens = 0;
+  let cacheCreation1hTokens = 0;
   let cacheReadTokens = 0;
   let model;
   let startedAt;
@@ -142,6 +160,8 @@ export function parseClaudeSession(transcriptPath) {
     inputTokens += r.inputTokens;
     outputTokens += r.outputTokens;
     cacheCreationTokens += r.cacheCreationTokens;
+    cacheCreation5mTokens += r.cacheCreation5mTokens;
+    cacheCreation1hTokens += r.cacheCreation1hTokens;
     cacheReadTokens += r.cacheReadTokens;
     if (!model && r.model) model = r.model;
     if (r.startedAt && (!startedAt || r.startedAt < startedAt)) startedAt = r.startedAt;
@@ -159,6 +179,8 @@ export function parseClaudeSession(transcriptPath) {
     inputTokens,
     outputTokens,
     cacheCreationTokens,
+    cacheCreation5mTokens,
+    cacheCreation1hTokens,
     cacheReadTokens,
     totalTokens,
     model,

@@ -32,10 +32,14 @@ afterEach(() => {
   rmSync(homeDir, { recursive: true, force: true });
 });
 
-const totals = (i, o, c, cc = 0) => ({
+// cacheCreation5m/1h are a TTL breakdown of cacheCreationTokens (priced 1.25x
+// and 2x input), carried through the ledger but never part of totalTokens.
+const totals = (i, o, c, cc = 0, cc5 = 0, cc1h = 0) => ({
   inputTokens: i,
   outputTokens: o,
   cacheCreationTokens: cc,
+  cacheCreation5mTokens: cc5,
+  cacheCreation1hTokens: cc1h,
   cacheReadTokens: c,
   totalTokens: i + o + c + cc,
 });
@@ -117,14 +121,11 @@ describe('multi-turn Codex session never double-counts', () => {
     for (const cumulative of cumulativeByTurn) {
       const sent = config.getSentTotals('codex', sessionId);
       const delta = config.computeDelta(cumulative, sent);
-      summed = {
-        inputTokens: summed.inputTokens + delta.inputTokens,
-        outputTokens: summed.outputTokens + delta.outputTokens,
-        cacheCreationTokens:
-          summed.cacheCreationTokens + delta.cacheCreationTokens,
-        cacheReadTokens: summed.cacheReadTokens + delta.cacheReadTokens,
-        totalTokens: summed.totalTokens + delta.totalTokens,
-      };
+      // Summed field-agnostically so adding a token field to the ledger cannot
+      // silently drop it from this conservation check.
+      summed = Object.fromEntries(
+        Object.keys(summed).map((field) => [field, summed[field] + delta[field]])
+      );
       // Only persist (mark as uploaded) when a non-zero delta would be sent —
       // mirrors codex/notify.mjs which skips upload + persist on a zero delta.
       if (delta.totalTokens > 0) {

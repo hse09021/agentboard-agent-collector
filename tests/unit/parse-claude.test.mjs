@@ -191,6 +191,66 @@ describe('parseClaudeSession — subagent files', () => {
   });
 });
 
+describe('parseClaudeSession — cache-write TTL split', () => {
+  // Anthropic prices a 5-minute cache write at 1.25x the input rate and a
+  // 1-hour write at 2x. Without the split the server cannot cost a
+  // cache-heavy session at all, which is why cache_creation used to
+  // contribute exactly $0 to every estimate.
+  function withCacheCreation(fiveMin, oneHour, total) {
+    const entry = makeAssistant({ cacheCreation: total });
+    entry.message.usage.cache_creation = {
+      ephemeral_5m_input_tokens: fiveMin,
+      ephemeral_1h_input_tokens: oneHour,
+    };
+    return entry;
+  }
+
+  it('splits cache creation into its two TTL buckets', () => {
+    const file = writeTmpJsonl('sess.jsonl', [withCacheCreation(0, 9140, 9140)]);
+    const result = parseClaudeSession(file);
+
+    expect(result.cacheCreationTokens).toBe(9140);
+    expect(result.cacheCreation5mTokens).toBe(0);
+    expect(result.cacheCreation1hTokens).toBe(9140);
+  });
+
+  it('keeps the split out of totalTokens — it is a breakdown, not extra usage', () => {
+    const file = writeTmpJsonl('sess.jsonl', [withCacheCreation(400, 600, 1000)]);
+    const result = parseClaudeSession(file);
+
+    expect(result.cacheCreation5mTokens + result.cacheCreation1hTokens).toBe(
+      result.cacheCreationTokens
+    );
+    expect(result.totalTokens).toBe(
+      result.inputTokens + result.outputTokens + result.cacheCreationTokens + result.cacheReadTokens
+    );
+  });
+
+  it('reports zeros when the transcript predates the split field', () => {
+    const file = writeTmpJsonl('sess.jsonl', [makeAssistant({ cacheCreation: 500 })]);
+    const result = parseClaudeSession(file);
+
+    expect(result.cacheCreationTokens).toBe(500);
+    expect(result.cacheCreation5mTokens).toBe(0);
+    expect(result.cacheCreation1hTokens).toBe(0);
+  });
+
+  it('sums the split across turns and days', () => {
+    const a = withCacheCreation(100, 200, 300);
+    a.timestamp = '2024-06-01T10:00:00.000Z';
+    const b = withCacheCreation(50, 250, 300);
+    b.timestamp = '2024-06-02T10:00:00.000Z';
+
+    const result = parseClaudeSession(writeTmpJsonl('sess.jsonl', [a, b]));
+
+    expect(result.cacheCreation5mTokens).toBe(150);
+    expect(result.cacheCreation1hTokens).toBe(450);
+    expect(result.byDate).toHaveLength(2);
+    expect(result.byDate[0].cacheCreation1hTokens).toBe(200);
+    expect(result.byDate[1].cacheCreation1hTokens).toBe(250);
+  });
+});
+
 describe('parseClaudeSession — per-day buckets', () => {
   it('files each turn under the day it actually ran on', () => {
     // The bug: this session was created on 06-01, so every one of its tokens —

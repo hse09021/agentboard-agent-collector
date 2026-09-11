@@ -25,10 +25,18 @@
 
 import { computeDelta } from './config.mjs';
 
+// `cacheCreation5mTokens` + `cacheCreation1hTokens` are a breakdown OF
+// `cacheCreationTokens`, not additions to it — they are deliberately excluded
+// from `totalTokens` so the total keeps meaning what it always did. They are
+// carried through the split because the two TTLs are priced differently
+// (1.25x input for 5-minute writes, 2x for 1-hour), and collapsing them into
+// one number is why cache-heavy sessions were costed at zero.
 export const TOKEN_FIELDS = [
   'inputTokens',
   'outputTokens',
   'cacheCreationTokens',
+  'cacheCreation5mTokens',
+  'cacheCreation1hTokens',
   'cacheReadTokens',
   'totalTokens',
 ];
@@ -58,6 +66,8 @@ export function addToDayBucket(buckets, isoTs, tokens) {
       inputTokens: 0,
       outputTokens: 0,
       cacheCreationTokens: 0,
+      cacheCreation5mTokens: 0,
+      cacheCreation1hTokens: 0,
       cacheReadTokens: 0,
       totalTokens: 0,
     };
