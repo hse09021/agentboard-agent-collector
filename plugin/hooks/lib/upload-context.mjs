@@ -87,10 +87,11 @@ export async function resolveUploadContextWithRefresh(input, log = () => {}) {
     return { ...context, token: outcome.bundle.access };
   }
   if (outcome.kind === 'reauth_required') {
-    // The refresh token is dead (90+ days offline, or the family was revoked).
-    // Upload anyway: the access token may have a little life left, and a 401
-    // here costs nothing beyond one request.
-    log(`refresh rejected: ${outcome.reason} — re-login required`);
+    // Either the refresh token is dead (90+ days offline, a revoked family) or
+    // the stored token predates refresh support and is nearing expiry. Upload
+    // anyway: the access token may have life left, and a 401 here costs one
+    // request. The reason carries the distinction to the CLI.
+    log(`re-login required: ${outcome.reason}`);
     recordAuthFailure({
       reason: outcome.reason,
       source: input.source,

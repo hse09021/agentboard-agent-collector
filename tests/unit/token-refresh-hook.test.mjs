@@ -44,6 +44,55 @@ async function writeBundle(bundle) {
 }
 
 describe('hook ensureFreshToken', () => {
+  // ── 레거시 토큰 (이슈 #7) ────────────────────────────────────────────────
+  // 훅은 force 를 쓰지 않는다. 그래서 레거시 분기가 not-due 조기 리턴 뒤에 있던
+  // 동안 이 경로는 통째로 죽어 있었고, 훅은 회전 불가능한 토큰을 멀쩡한 토큰으로
+  // 취급하다가 만료와 함께 조용히 업로드를 잃었다.
+  it('leaves a healthy legacy token alone', async () => {
+    await writeBundle({
+      v: 1,
+      access: 'legacy',
+      access_expires_at: nowSec() + 30 * 24 * 60 * 60,
+      refresh: null,
+    });
+    const fetchSpy = vi.fn(() => jsonResponse({}));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const { ensureFreshToken } = await import('../../plugin/hooks/lib/token-refresh.mjs');
+    expect((await ensureFreshToken(API)).kind).toBe('current');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('asks for a re-login once a legacy token nears expiry, without force', async () => {
+    await writeBundle({
+      v: 1,
+      access: 'legacy',
+      access_expires_at: nowSec() + 60 * 60,
+      refresh: null,
+    });
+    const fetchSpy = vi.fn(() => jsonResponse({}));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const { ensureFreshToken, LEGACY_TOKEN_REASON } = await import(
+      '../../plugin/hooks/lib/token-refresh.mjs'
+    );
+    const outcome = await ensureFreshToken(API);
+
+    expect(outcome.kind).toBe('reauth_required');
+    expect(outcome.reason).toBe(LEGACY_TOKEN_REASON);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('stays quiet for a legacy token whose expiry cannot be read', async () => {
+    await writeBundle({ v: 1, access: 'opaque-no-exp', refresh: null });
+    const fetchSpy = vi.fn(() => jsonResponse({}));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const { ensureFreshToken } = await import('../../plugin/hooks/lib/token-refresh.mjs');
+    expect((await ensureFreshToken(API)).kind).toBe('current');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('does not call the server when the token has life left', async () => {
     await writeBundle({ v: 1, access: 'acc', access_expires_at: nowSec() + 3600, refresh: 'r1' });
     const fetchSpy = vi.fn(() => jsonResponse({}));

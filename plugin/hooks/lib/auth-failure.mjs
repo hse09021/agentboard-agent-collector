@@ -24,9 +24,19 @@ export const AUTH_FAILURE_PATH = join(CONFIG_DIR, 'auth-failure.json');
  */
 export function recordAuthFailure(detail = {}) {
   try {
+    const reason = detail.reason ?? 'authentication failed';
+
+    // Rewrite only when the situation itself changed. Hooks run on every
+    // session end, and the legacy-token notice repeats for as long as the user
+    // has not logged in again — re-writing an identical record each time
+    // churns a file other hooks are concurrently reading, and moves `at`
+    // forward so the user cannot tell how long this has been true.
+    const existing = readAuthFailure();
+    if (existing && existing.reason === reason) return;
+
     writeJsonAtomic(AUTH_FAILURE_PATH, {
       at: new Date().toISOString(),
-      reason: detail.reason ?? 'authentication failed',
+      reason,
       ...(detail.source ? { source: detail.source } : {}),
       ...(detail.apiBaseUrl ? { api_base_url: detail.apiBaseUrl } : {}),
     });
