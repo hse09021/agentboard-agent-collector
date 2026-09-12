@@ -27,6 +27,10 @@ vi.mock("../../src/core/config", () => ({
   saveConfig: (patch: unknown) => saveConfig(patch),
 }));
 
+vi.mock("../../src/core/device-id", () => ({
+  generateDeviceId: () => "dev_fresh",
+}));
+
 vi.mock("../../src/api/client", async () => {
   const actual = await vi.importActual<typeof import("../../src/api/client")>(
     "../../src/api/client"
@@ -122,5 +126,50 @@ describe("loginCommand", () => {
     expect(saveToken).not.toHaveBeenCalled();
     expect(saveConfig).not.toHaveBeenCalled();
     expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  // revoke 는 서버가 같은 device_id 를 영구히 거부하므로, 사람이 다시 인증한
+  // 이 시점에 새 기기로 연결하지 않으면 사용자는 config 를 손으로 지우는 것 말고
+  // 복구할 방법이 없다. 훅에서는 절대 하면 안 되는 동작이지만 여기서는 맞다.
+  it("reconnects as a new device when this one was revoked", async () => {
+    registerDevice
+      .mockRejectedValueOnce(
+        new ApiError(403, '{"code":"revoked_device"}', "revoked_device")
+      )
+      .mockResolvedValueOnce({
+        device_id: "dev_fresh",
+        registered_at: "2026-01-01T00:00:00Z",
+      });
+
+    await runLogin();
+
+    expect(registerDevice).toHaveBeenCalledTimes(2);
+    expect(registerDevice.mock.calls[0][0].device_id).toBe("dev_test");
+    expect(registerDevice.mock.calls[1][0].device_id).toBe("dev_fresh");
+    expect(saveToken).toHaveBeenCalledWith("pasted-token");
+    expect(saveConfig).toHaveBeenCalledWith({ device_id: "dev_fresh" });
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it("retries the revoked device only once", async () => {
+    registerDevice.mockRejectedValue(
+      new ApiError(403, '{"code":"revoked_device"}', "revoked_device")
+    );
+
+    await expect(runLogin()).rejects.toThrow(ExitError);
+
+    expect(registerDevice).toHaveBeenCalledTimes(2);
+    expect(saveToken).not.toHaveBeenCalled();
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  // 403 이어도 revoked_device 가 아니면 토큰 문제다 — 새 기기로 바꿔봐야 소용없다.
+  it("does not mint a new device id for a plain 403", async () => {
+    registerDevice.mockRejectedValue(new ApiError(403, "Forbidden"));
+
+    await expect(runLogin()).rejects.toThrow(ExitError);
+
+    expect(registerDevice).toHaveBeenCalledOnce();
+    expect(saveConfig).not.toHaveBeenCalled();
   });
 });

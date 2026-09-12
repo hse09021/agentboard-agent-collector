@@ -1,5 +1,6 @@
 import * as readline from "readline";
 import { loadConfig, getOrCreateDeviceId, saveConfig } from "../../core/config";
+import { generateDeviceId } from "../../core/device-id";
 import { saveToken, hasToken } from "../../platform/credential-store";
 import { detectOS } from "../../platform/os";
 import { ApiError, createApiClient } from "../../api/client";
@@ -29,7 +30,7 @@ export async function loginCommand(options: { force?: boolean } = {}): Promise<v
   }
 
   const config = loadConfig();
-  const deviceId = getOrCreateDeviceId();
+  let deviceId = getOrCreateDeviceId();
   const loginUrl = new URL("/cli/login", config.app_base_url);
   loginUrl.searchParams.set("device_id", deviceId);
 
@@ -53,13 +54,31 @@ export async function loginCommand(options: { force?: boolean } = {}): Promise<v
 
   // 토큰은 서버가 받아준 뒤에만 저장한다. 먼저 저장해 버리면 인증에 실패해도
   // `hasToken()`이 true가 되어 status/doctor/hook이 "로그인됨"으로 동작한다.
-  try {
-    const client = createApiClient(config.api_base_url, token);
-    await client.registerDevice({
-      device_id: deviceId,
+  const client = createApiClient(config.api_base_url, token);
+  const register = (id: string) =>
+    client.registerDevice({
+      device_id: id,
       collector_version: COLLECTOR_VERSION,
       os: detectOS(),
     });
+
+  try {
+    try {
+      await register(deviceId);
+    } catch (err) {
+      // 이 기기가 대시보드에서 연결 해제된 경우. 서버는 같은 device_id 의 재등록을
+      // 영구히 거부하므로(revoke 가 되돌려지면 안 되니까) 새 id 로 연결해야 한다.
+      //
+      // 훅에서는 절대 하면 안 되는 일이지만 여기서는 맞다 — 사람이 방금 브라우저에서
+      // 다시 인증했고, 그게 revoke 를 되돌릴 자격을 가진 유일한 행위다.
+      if (!(err instanceof ApiError) || err.code !== "revoked_device") throw err;
+
+      logger.warn(
+        "This device was disconnected in AgentBoard. Reconnecting as a new device."
+      );
+      deviceId = generateDeviceId();
+      await register(deviceId);
+    }
   } catch (err) {
     if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
       logger.error(
