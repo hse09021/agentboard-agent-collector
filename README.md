@@ -72,6 +72,27 @@ agentboard login
 
 터미널에 출력된 URL을 브라우저로 열고, GitHub OAuth 완료 후 표시되는 인증 토큰을 터미널에 붙여넣으면 됩니다.
 
+로그인하면 짧은 수명의 **access 토큰**과, 그것을 갱신하는 **refresh 토큰**이 함께 저장됩니다
+(`~/.agentboard/.token`, 권한 `0600`). access 토큰이 만료에 가까워지면 CLI와 훅이 각자 자동으로
+갱신하므로, **주기적으로 다시 로그인할 필요가 없습니다.**
+
+`agentboard logout` 은 로컬 파일을 지우는 동시에 서버에도 refresh 폐기를 요청합니다.
+서버에 연결할 수 없어도 로컬 자격증명은 삭제되며, 이 경우 경고가 표시됩니다.
+
+<details>
+<summary>구버전에서 올라온 경우 / 자동 갱신이 없는 토큰</summary>
+
+0.9.x 이하에서 저장된 단일 토큰도 그대로 읽히므로 업데이트 직후 다시 로그인할 필요는 없습니다.
+다만 그 토큰에는 refresh 가 없어 만료되면 수집이 멈춥니다. `agentboard status` 가 이를
+"no automatic renewal" 로 표시하며, `agentboard login` 을 한 번 다시 실행하면 갱신되는
+형식으로 전환됩니다.
+
+갱신 시점은 기본적으로 만료 5분 전입니다. `AGENTBOARD_REFRESH_THRESHOLD_SECONDS` 로 조정할 수
+있지만, 실제로 필요한 경우는 짧은 TTL 로 로테이션을 검증할 때뿐입니다. 이 값은 토큰 수명의 1/3 을
+넘지 않도록 자동으로 제한됩니다 — 그러지 않으면 매 요청마다 갱신이 일어나 rate limit 에 걸립니다.
+
+</details>
+
 ### 2. 훅 등록
 
 ```bash

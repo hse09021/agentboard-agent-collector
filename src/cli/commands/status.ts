@@ -2,9 +2,18 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { loadConfig, getConfigDir, getHookSentPath } from "../../core/config";
-import { hasToken, loadToken } from "../../platform/credential-store";
+import {
+  hasToken,
+  loadToken,
+  loadTokenBundle,
+} from "../../platform/credential-store";
+import {
+  describeCredential,
+  formatCredentialStatus,
+} from "../../core/credential-status";
+import { readAuthFailure } from "../../core/auth-failure";
 import { COLLECTOR_VERSION } from "../../core/usage-event";
-import { ApiError, createApiClient } from "../../api/client";
+import { ApiError, createDefaultRouteClient } from "../../api/client";
 import { UsageSummary, UsageBySource } from "../../api/types";
 import { logger } from "../../core/logger";
 import { listAgentHomes } from "../../core/agent-homes";
@@ -124,10 +133,27 @@ export async function statusCommand(): Promise<void> {
     ? chalk.green("Logged in")
     : chalk.red("Not logged in");
   logger.plain(`Auth:            ${authStatus}`);
+  if (loggedIn) {
+    logger.plain(
+      `Credential:      ${chalk.dim(formatCredentialStatus(describeCredential(loadTokenBundle())))}`
+    );
+  }
   logger.plain(`Device ID:       ${chalk.dim(config.device_id ?? "(not set)")}`);
   logger.plain(`Collector:       v${COLLECTOR_VERSION}`);
   logger.plain(`Sessions sent:   ${chalk.cyan(String(hookSentCount()))}`);
   logger.plain("");
+
+  // Hooks have no stdout anyone reads, so a renewal the server refused is
+  // invisible until it is surfaced here. Without this, collection stops and the
+  // only symptom is a dashboard that quietly stops growing.
+  const authFailure = readAuthFailure();
+  if (authFailure) {
+    logger.warn(
+      `Automatic renewal failed${authFailure.at ? ` at ${authFailure.at.slice(0, 19).replace("T", " ")}` : ""}: ${authFailure.reason}`
+    );
+    logger.plain(chalk.dim("Run `agentboard login` to reconnect."));
+    logger.plain("");
+  }
 
   // ── Hook registration status ─────────────────────────────────────────────
   logger.plain(chalk.bold("Hooks"));
@@ -186,7 +212,7 @@ export async function statusCommand(): Promise<void> {
   }
 
   const token = loadToken();
-  const client = createApiClient(config.api_base_url, token!);
+  const client = createDefaultRouteClient(config.api_base_url, token!);
 
   // 연결이 끊긴 기기는 사용량 숫자가 멀쩡히 보여도(토큰은 살아 있으므로) 더 이상
   // 수집되지 않는다. 숫자보다 먼저 알려야 "왜 어제부터 안 늘지"를 헤매지 않는다.
