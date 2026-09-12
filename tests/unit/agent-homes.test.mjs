@@ -156,9 +156,21 @@ describe('Orca managed account homes', () => {
     codex: { dir: 'codex-accounts', leaf: 'home', marker: '.orca-managed-home' },
   };
 
+  // orcaUserDataDirs() 와 같은 규칙으로 현재 플랫폼의 Orca 루트를 만든다.
+  // Windows 경로를 하드코딩하면 리눅스/맥에서는 구현이 ~/.local/share/orca 를
+  // 뒤지므로 아무것도 찾지 못해, 탐색 테스트가 전부 실패하고 0건을 기대하는
+  // 테스트는 마커 검사가 망가져도 통과해 버린다.
+  function orcaRoot() {
+    if (process.platform === 'win32') return join(homeDir, 'AppData', 'Roaming', 'Orca');
+    if (process.platform === 'darwin') {
+      return join(homeDir, 'Library', 'Application Support', 'Orca');
+    }
+    return join(homeDir, '.local', 'share', 'orca');
+  }
+
   function makeAccount(kind, id, { marker = true } = {}) {
     const l = LAYOUT[kind];
-    const home = join(homeDir, 'AppData', 'Roaming', 'Orca', l.dir, id, l.leaf);
+    const home = join(orcaRoot(), l.dir, id, l.leaf);
     mkdirSync(home, { recursive: true });
     if (marker) writeFileSync(join(home, l.marker), id + '\n');
     return home;
@@ -173,7 +185,7 @@ describe('Orca managed account homes', () => {
   });
 
   it('finds a managed Codex account alongside the shared runtime home', async () => {
-    const runtime = join(homeDir, 'AppData', 'Roaming', 'Orca', 'codex-runtime-home', 'home');
+    const runtime = join(orcaRoot(), 'codex-runtime-home', 'home');
     mkdirSync(runtime, { recursive: true });
     makeAccount('codex', 'acct-1');
     await reimport();
@@ -200,7 +212,7 @@ describe('Orca managed account homes', () => {
 
   it('does not accept a Claude marker in a Codex account, or the reverse', async () => {
     // The two layouts are distinct; a mixed-up marker must not qualify.
-    const codexHome = join(homeDir, 'AppData', 'Roaming', 'Orca', 'codex-accounts', 'x', 'home');
+    const codexHome = join(orcaRoot(), 'codex-accounts', 'x', 'home');
     mkdirSync(codexHome, { recursive: true });
     writeFileSync(join(codexHome, '.orca-managed-claude-auth'), 'x\n');
     await reimport();

@@ -39,12 +39,23 @@ afterEach(() => {
   rmSync(homeDir, { recursive: true, force: true });
 });
 
+// orcaUserDataDirs() 와 같은 규칙으로 현재 플랫폼의 Orca 루트를 만든다.
+// Windows 경로를 하드코딩하면 리눅스/맥에서 구현이 뒤지는 곳과 어긋나 탐색이
+// 항상 0건이 된다.
+function orcaRoot(): string {
+  if (process.platform === "win32") return join(homeDir, "AppData", "Roaming", "Orca");
+  if (process.platform === "darwin") {
+    return join(homeDir, "Library", "Application Support", "Orca");
+  }
+  return join(homeDir, ".local", "share", "orca");
+}
+
 function orcaAccount(kind: "codex" | "claude_code", id: string) {
   const [dir, leaf, marker] =
     kind === "codex"
       ? ["codex-accounts", "home", ".orca-managed-home"]
       : ["claude-accounts", "auth", ".orca-managed-claude-auth"];
-  const home = join(homeDir, "AppData", "Roaming", "Orca", dir, id, leaf);
+  const home = join(orcaRoot(), dir, id, leaf);
   mkdirSync(home, { recursive: true });
   writeFileSync(join(home, marker), id + "\n");
   return home;
