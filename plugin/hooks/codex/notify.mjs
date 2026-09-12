@@ -29,7 +29,7 @@ import {
 } from '../lib/config.mjs';
 import { splitSessionDelta } from '../lib/daily-split.mjs';
 import { uploadEvents } from '../lib/transport.mjs';
-import { resolveUploadContext } from '../lib/upload-context.mjs';
+import { resolveUploadContextWithRefresh } from '../lib/upload-context.mjs';
 import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
 
@@ -186,7 +186,7 @@ async function main() {
   // Codex's notify payload carries only {thread-id, status}, so the routing
   // anchor comes from session_meta.cwd in the rollout file. It is used to pick
   // a destination and never uploaded.
-  const ctx = resolveUploadContext({ source: 'codex', sessionId, cwd: parsed?.cwd });
+  const ctx = await resolveUploadContextWithRefresh({ source: 'codex', sessionId, cwd: parsed?.cwd });
   if (!ctx.ok) {
     process.stderr.write(`agentboard-codex: ${ctx.reason}\n`);
     process.exit(0);
