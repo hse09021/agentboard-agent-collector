@@ -107,22 +107,23 @@ describe('hook ensureFreshToken', () => {
 
   it('rotates and persists when near expiry', async () => {
     await writeBundle({ v: 1, access: 'old', access_expires_at: nowSec() + 30, refresh: 'r1' });
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(() =>
-        jsonResponse({
-          v: 1,
-          access: 'new',
-          access_expires_at: nowSec() + 3600,
-          refresh: 'r2',
-        }),
-      ),
+    const fetchSpy = vi.fn(() =>
+      jsonResponse({
+        v: 1,
+        access: 'new',
+        access_expires_at: nowSec() + 3600,
+        refresh: 'r2',
+      }),
     );
+    vi.stubGlobal('fetch', fetchSpy);
 
     const { ensureFreshToken } = await import('../../plugin/hooks/lib/token-refresh.mjs');
     const outcome = await ensureFreshToken(API);
 
     expect(outcome.kind).toBe('refreshed');
+    // ★ 요청 키는 refresh_token 이다 (응답 키 refresh 와 다르다). 훅과 CLI 가
+    //   같은 서버 스키마를 상대하므로 두 테스트가 같은 것을 고정해야 한다.
+    expect(JSON.parse(String(fetchSpy.mock.calls[0][1].body))).toEqual({ refresh_token: 'r1' });
     const config = await import('../../plugin/hooks/lib/config.mjs');
     expect(config.loadTokenBundle()).toMatchObject({ access: 'new', refresh: 'r2' });
   });

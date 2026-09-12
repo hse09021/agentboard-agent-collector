@@ -83,7 +83,7 @@ async function postRefresh(apiBaseUrl, refreshToken) {
     response = await fetch(refreshUrl(apiBaseUrl), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refresh: refreshToken }),
+      body: JSON.stringify({ refresh_token: refreshToken }),
       signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     });
   } catch (err) {

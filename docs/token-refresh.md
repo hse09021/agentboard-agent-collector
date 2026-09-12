@@ -112,7 +112,13 @@ near the end of the lifetime" instead of "refresh on every request".
 3. **Re-read the token file.** Another process may have refreshed while we
    waited. If the access token on disk is now usable, use it and do not call the
    server.
-4. `POST {api}/v1/auth/token/refresh` with `{"refresh": "<opaque>"}`.
+4. `POST {api}/v1/auth/token/refresh` with `{"refresh_token": "<opaque>"}`.
+   **요청 키는 `refresh_token`, 응답 키는 `refresh` 다.** 이름이 어긋나는 것은
+   서버 스키마(`api/src/modules/auth/routes/token.ts`)가 그렇게 정해져 있기
+   때문이다. 요청을 `refresh` 로 보내면 400(ZodError)이 오는데, 400 은 아래
+   표에서 `unavailable` 로 분류되어 조용히 삼켜지므로 — 로테이션이 한 번도
+   돌지 않으면서 에러도 보이지 않는 상태가 된다. 이 문서가 `refresh` 로
+   적혀 있어 양쪽 구현이 같은 실수를 했다. `revoke` 도 같은 스키마를 쓴다.
 5. On success, write the new bundle atomically.
 6. **Release the lock in `finally`.**
 

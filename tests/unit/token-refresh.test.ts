@@ -102,8 +102,10 @@ describe("ensureFreshToken", () => {
     expect(outcome.kind).toBe("refreshed");
     expect(fetchSpy).toHaveBeenCalledOnce();
     expect(String(fetchSpy.mock.calls[0][0])).toBe(`${API}/v1/auth/token/refresh`);
+    // ★ 요청 키는 refresh_token 이다 (응답 키 refresh 와 다르다).
+    //   이 단언이 refresh 로 적혀 있어 서버 스키마와 어긋난 구현을 통과시켰다.
     expect(JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body))).toEqual({
-      refresh: "r1",
+      refresh_token: "r1",
     });
 
     const { loadTokenBundle } = await import("../../src/platform/credential-store");
@@ -378,5 +380,20 @@ describe("revokeRefreshToken", () => {
 
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("offline");
+  });
+
+  // ★ 서버 스키마(api .../routes/token.ts)는 요청에서 refresh_token 을 요구한다.
+  //   응답 필드는 refresh 라 이름이 어긋나는데, 요청을 refresh 로 보내면 서버가
+  //   400(ZodError) 을 돌려주고 그 400 은 unavailable 로 분류되어 조용히 삼켜진다.
+  //   로테이션이 한 번도 돌지 않는데 에러도 안 보이는 상태였으므로, 키 이름 자체를
+  //   고정한다. URL 만 검증하던 기존 테스트는 이 버그를 통과시켰다.
+  it("sends the refresh token under the key the server requires", async () => {
+    const fetchSpy = mockFetch(() => new Response(null, { status: 204 }));
+
+    const { revokeRefreshToken } = await import("../../src/api/token-refresh");
+    await revokeRefreshToken(API, "r1");
+
+    const body = JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body));
+    expect(body).toEqual({ refresh_token: "r1" });
   });
 });
