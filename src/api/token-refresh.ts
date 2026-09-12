@@ -17,11 +17,17 @@ import { withTokenLock } from "../platform/token-lock";
 import { decodeJwtClaims } from "../core/jwt";
 import {
   effectiveThresholdSeconds,
+  isLegacyNoticeDue,
+  LEGACY_TOKEN_REASON,
   shouldRefresh,
   tokenTtlSeconds,
 } from "../core/refresh-policy";
 
 const REFRESH_TIMEOUT_MS = 15_000;
+
+// Re-exported so callers of this module do not need to reach into the policy
+// module for the one string they might compare against.
+export { LEGACY_TOKEN_REASON };
 
 export type RefreshOutcome =
   /** A newer bundle is in hand (rotated here, or written by another process). */
@@ -67,6 +73,18 @@ export function parseRefreshResponse(body: unknown): TokenBundle | null {
     refresh: typeof obj.refresh === "string" && obj.refresh ? obj.refresh : null,
     refresh_expires_at: num(obj.refresh_expires_at),
   };
+}
+
+/**
+ * A legacy token's expiry, from the bundle or the JWT's own claim.
+ *
+ * Undefined when neither is readable, which the caller treats as "say
+ * nothing" — an opaque token of unknown lifetime gives no grounds to warn.
+ */
+function legacyExpiresAt(bundle: TokenBundle): number | undefined {
+  if (bundle.access_expires_at !== undefined) return bundle.access_expires_at;
+  const exp = decodeJwtClaims(bundle.access)?.exp;
+  return typeof exp === "number" ? exp : undefined;
 }
 
 /** Whether this bundle is due for a pre-emptive refresh. */
@@ -148,17 +166,27 @@ export async function ensureFreshToken(
   const bundle = loadTokenBundle();
   if (!bundle) return { kind: "reauth_required", reason: "not logged in" };
 
-  if (!options.force && !isDueForRefresh(bundle, nowMs)) {
+  // ★ Legacy tokens are checked BEFORE the not-due early return below.
+  //
+  // isDueForRefresh() answers false for a legacy bundle — correctly, since
+  // there is nothing to rotate with — so putting this check after it left the
+  // branch unreachable outside the force path, and a hook (which never forces)
+  // treated an unrotatable token as a healthy one right up until it expired
+  // and uploads started failing with a 401 nobody reads.
+  if (!bundle.refresh) {
+    // `force` is the post-401 path: the server has just refused this token, so
+    // its printed expiry is beside the point — there is no way to recover it.
+    // Otherwise speak up only once expiry is actually close; the token works
+    // until then, and demanding a re-login from someone whose collection is
+    // fine reads as a bug rather than a warning.
+    if (options.force || isLegacyNoticeDue(legacyExpiresAt(bundle), undefined, nowMs)) {
+      return { kind: "reauth_required", reason: LEGACY_TOKEN_REASON };
+    }
     return { kind: "current", bundle };
   }
 
-  if (!bundle.refresh) {
-    // A pre-0.10 token that cannot rotate. Say so plainly rather than reporting
-    // a transient failure that will never clear.
-    return {
-      kind: "reauth_required",
-      reason: "stored token predates refresh support",
-    };
+  if (!options.force && !isDueForRefresh(bundle, nowMs)) {
+    return { kind: "current", bundle };
   }
 
   return withTokenLock(

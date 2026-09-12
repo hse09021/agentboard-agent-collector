@@ -10,6 +10,17 @@ export const DEFAULT_REFRESH_THRESHOLD_SECONDS = 300;
 export const REFRESH_THRESHOLD_ENV = 'AGENTBOARD_REFRESH_THRESHOLD_SECONDS';
 
 /**
+ * Why a re-login is needed when the stored token cannot rotate at all.
+ * Mirrors src/core/refresh-policy.ts — the exact bytes matter, since the CLI
+ * keys off this string to word the message correctly.
+ */
+export const LEGACY_TOKEN_REASON = 'stored token predates refresh support';
+
+/** Seven days. How far ahead a legacy token's expiry is worth mentioning. */
+export const DEFAULT_LEGACY_NOTICE_SECONDS = 7 * 24 * 60 * 60;
+export const LEGACY_NOTICE_ENV = 'AGENTBOARD_LEGACY_NOTICE_SECONDS';
+
+/**
  * The configured pre-emptive window, in seconds.
  *
  * An env var rather than a constant: verifying rotation needs the server's
@@ -69,4 +80,41 @@ export function tokenTtlSeconds(claims) {
 export function shouldRefresh(accessExpiresAt, thresholdSeconds, nowMs = Date.now()) {
   if (accessExpiresAt === undefined) return false;
   return Math.floor(nowMs / 1000) >= accessExpiresAt - thresholdSeconds;
+}
+
+/**
+ * How long before a legacy token expires to start asking for a re-login.
+ *
+ * Not the access threshold: that is sized for a one-hour token and defaults to
+ * five minutes, while a legacy token runs 30 days — warning five minutes ahead
+ * would be far too late. No TTL cap either; the cap protects the refresh
+ * endpoint, and this path never calls it.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ */
+export function legacyNoticeSeconds(env = process.env) {
+  const raw = env[LEGACY_NOTICE_ENV];
+  // Empty means unset, not zero — same reading as the access threshold.
+  if (raw === undefined || raw.trim() === '') return DEFAULT_LEGACY_NOTICE_SECONDS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_LEGACY_NOTICE_SECONDS;
+  return Math.floor(parsed);
+}
+
+/**
+ * Whether a legacy (non-rotatable) token is close enough to expiry to warrant
+ * telling the user to log in again. Unknown expiry returns false — no grounds
+ * for a warning, and guessing would cry wolf every session.
+ *
+ * @param {number|undefined} accessExpiresAt unix seconds
+ * @param {number} [noticeSeconds]
+ * @param {number} [nowMs]
+ */
+export function isLegacyNoticeDue(
+  accessExpiresAt,
+  noticeSeconds = legacyNoticeSeconds(),
+  nowMs = Date.now(),
+) {
+  if (accessExpiresAt === undefined) return false;
+  return Math.floor(nowMs / 1000) >= accessExpiresAt - noticeSeconds;
 }

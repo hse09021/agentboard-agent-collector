@@ -13,7 +13,7 @@ import {
   formatCredentialStatus,
   isCredentialHealthy,
 } from "../../core/credential-status";
-import { readAuthFailure } from "../../core/auth-failure";
+import { readAuthFailure, describeAuthFailure } from "../../core/auth-failure";
 import { loadConfigV2, findOrphans } from "../../core/bindings";
 import { scanAllGhostSessions, removeGhostSessions } from "../../core/ghost-sessions";
 import { listAgentHomes } from "../../core/agent-homes";
@@ -81,11 +81,10 @@ async function runChecks(): Promise<CheckResult[]> {
   // until something surfaces it here — otherwise collection just stops.
   const authFailure = readAuthFailure();
   if (authFailure) {
-    const when = authFailure.at ? authFailure.at.slice(0, 19).replace("T", " ") : "recently";
     results.push({
       label: "Hook auth",
       ok: false,
-      message: `Renewal failed at ${when} (${authFailure.reason}) — run \`agentboard login\``,
+      message: `${describeAuthFailure(authFailure)} — run \`agentboard login\``,
     });
   }
 

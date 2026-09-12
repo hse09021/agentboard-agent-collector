@@ -12,6 +12,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { getConfigDir } from "./config";
+import { LEGACY_TOKEN_REASON } from "./refresh-policy";
 
 export interface AuthFailureRecord {
   /** ISO timestamp of the failure. */
@@ -19,6 +20,23 @@ export interface AuthFailureRecord {
   reason: string;
   source?: string;
   api_base_url?: string;
+}
+
+/**
+ * Turns a record into the sentence the user reads.
+ *
+ * A legacy token and a rejected refresh token both end collection and both need
+ * `agentboard login`, but they are not the same event: one was never renewable,
+ * the other was refused. Reporting "renewal failed" for a legacy token
+ * describes an attempt that never took place, which sends the user looking for
+ * a server problem that is not there.
+ */
+export function describeAuthFailure(record: AuthFailureRecord): string {
+  const when = record.at ? record.at.slice(0, 19).replace("T", " ") : "";
+  if (record.reason === LEGACY_TOKEN_REASON) {
+    return "This device still uses a pre-0.10 token, which cannot be renewed automatically and is about to expire";
+  }
+  return `Automatic renewal failed${when ? ` at ${when}` : ""}: ${record.reason}`;
 }
 
 export function getAuthFailurePath(): string {

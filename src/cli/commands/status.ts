@@ -11,7 +11,7 @@ import {
   describeCredential,
   formatCredentialStatus,
 } from "../../core/credential-status";
-import { readAuthFailure } from "../../core/auth-failure";
+import { readAuthFailure, describeAuthFailure } from "../../core/auth-failure";
 import { COLLECTOR_VERSION } from "../../core/usage-event";
 import { ApiError, createDefaultRouteClient } from "../../api/client";
 import { UsageSummary, UsageBySource } from "../../api/types";
@@ -148,9 +148,7 @@ export async function statusCommand(): Promise<void> {
   // only symptom is a dashboard that quietly stops growing.
   const authFailure = readAuthFailure();
   if (authFailure) {
-    logger.warn(
-      `Automatic renewal failed${authFailure.at ? ` at ${authFailure.at.slice(0, 19).replace("T", " ")}` : ""}: ${authFailure.reason}`
-    );
+    logger.warn(describeAuthFailure(authFailure));
     logger.plain(chalk.dim("Run `agentboard login` to reconnect."));
     logger.plain("");
   }

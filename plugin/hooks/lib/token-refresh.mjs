@@ -10,9 +10,18 @@
 
 import { loadTokenBundle, saveTokenBundle, decodeJwtClaims } from './config.mjs';
 import { withTokenLock } from './token-lock.mjs';
-import { effectiveThresholdSeconds, shouldRefresh, tokenTtlSeconds } from './refresh-policy.mjs';
+import {
+  effectiveThresholdSeconds,
+  isLegacyNoticeDue,
+  LEGACY_TOKEN_REASON,
+  shouldRefresh,
+  tokenTtlSeconds,
+} from './refresh-policy.mjs';
 
 const REFRESH_TIMEOUT_MS = 15_000;
+
+// Re-exported for callers (and tests) that compare against the reason.
+export { LEGACY_TOKEN_REASON };
 
 function refreshUrl(apiBaseUrl) {
   return `${String(apiBaseUrl).replace(/\/$/, '')}/v1/auth/token/refresh`;
@@ -45,6 +54,18 @@ export function parseRefreshResponse(body) {
  * @param {{access: string, access_expires_at?: number, refresh: string|null}} bundle
  * @param {number} [nowMs]
  */
+/**
+ * A legacy token's expiry, from the bundle or the JWT claim. Undefined when
+ * neither is readable — the caller then stays silent.
+ *
+ * @param {{access: string, access_expires_at?: number}} bundle
+ */
+function legacyExpiresAt(bundle) {
+  if (bundle?.access_expires_at !== undefined) return bundle.access_expires_at;
+  const exp = decodeJwtClaims(bundle?.access)?.exp;
+  return typeof exp === 'number' ? exp : undefined;
+}
+
 export function isDueForRefresh(bundle, nowMs = Date.now()) {
   if (!bundle?.refresh) return false; // legacy token — nothing to rotate with
   const claims = decodeJwtClaims(bundle.access) ?? {};
@@ -110,12 +131,26 @@ export async function ensureFreshToken(apiBaseUrl, options = {}) {
   const bundle = loadTokenBundle();
   if (!bundle) return { kind: 'reauth_required', reason: 'not logged in' };
 
-  if (!options.force && !isDueForRefresh(bundle, nowMs)) {
+  // ★ Legacy tokens are checked BEFORE the not-due early return below.
+  //
+  // isDueForRefresh() answers false for a legacy bundle — nothing to rotate
+  // with — so this branch used to sit after it and was unreachable without
+  // `force`, which hooks never pass. The effect was that a hook treated an
+  // unrotatable token as healthy until it expired and uploads began failing
+  // with a 401 that, on this path, nobody ever sees.
+  if (!bundle.refresh) {
+    // `force` is the post-401 path: the server just refused this token, so its
+    // printed expiry is beside the point. Otherwise speak up only once expiry
+    // is close — the token still works until then, and warning a user whose
+    // collection is fine reads as a bug rather than a notice.
+    if (options.force || isLegacyNoticeDue(legacyExpiresAt(bundle), undefined, nowMs)) {
+      return { kind: 'reauth_required', reason: LEGACY_TOKEN_REASON };
+    }
     return { kind: 'current', bundle };
   }
 
-  if (!bundle.refresh) {
-    return { kind: 'reauth_required', reason: 'stored token predates refresh support' };
+  if (!options.force && !isDueForRefresh(bundle, nowMs)) {
+    return { kind: 'current', bundle };
   }
 
   return withTokenLock(

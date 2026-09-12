@@ -53,6 +53,34 @@ Let `threshold` be the pre-emptive refresh window in seconds.
   is also missing, do not pre-emptively refresh (an opaque token of unknown
   lifetime), and rely on the 401 path.
 
+### Legacy tokens are reported, not refreshed
+
+A bundle with `refresh: null` came from a pre-0.10 file. It cannot be rotated:
+the server stores a hash of the refresh token it issued, and a legacy access
+JWT was never in that table, so submitting it returns 401. There is no local
+fix — only `agentboard login` mints a pair.
+
+Silence is the wrong default here. The token still works until it expires, and
+then uploads fail with a 401 nobody sees. So:
+
+- While a legacy token is comfortably valid, do nothing. It works.
+- Once it is within `legacyThreshold` of expiry, return `reauth_required` with
+  a reason that says the token predates refresh support. Upload anyway — the
+  access token has life left, and the caller decides what to do with the
+  outcome.
+- If expiry is unknown (no `access_expires_at` and no `exp`), stay silent.
+  A warning with no basis is worse than none.
+- On the post-401 `force` path, report it regardless of expiry. The server has
+  just refused the token, so what it claims about its own lifetime is moot.
+
+`legacyThreshold` is **not** the access threshold. That one defaults to 300s,
+sized for a one-hour access token; a legacy token lasts 30 days, so 300s would
+warn five minutes before collection breaks. It is
+`AGENTBOARD_LEGACY_NOTICE_SECONDS`, default 7 days, and the TTL cap that
+applies to the access threshold does not apply to it — the cap exists to stop a
+misconfigured threshold from refreshing on every request, and this path never
+calls the server.
+
 ### The threshold must not be a constant
 
 Verifying rotation end-to-end means shortening the server's access TTL to 60s.
@@ -121,6 +149,16 @@ first of two defences; the second is the server's 30s grace window on `used_at`.
 A hook has no stdout the user reads. When it cannot refresh because the refresh
 token itself is rejected, it appends to `~/.agentboard/auth-failure.json`, and
 the next `agentboard status` / `agentboard doctor` shows it.
+
+The same file carries the legacy-token notice above. The two are different
+situations and must not read the same: a rejected refresh token means renewal
+was tried and failed, while a legacy token was never renewable in the first
+place. Telling a legacy user that "renewal failed" describes something that
+never happened.
+
+The record is rewritten only when its reason changes. Hooks run on every
+session end, and rewriting an identical record each time churns the file that
+concurrent hooks are reading.
 
 ## Login / logout
 

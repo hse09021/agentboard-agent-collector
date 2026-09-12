@@ -11,6 +11,20 @@ export const DEFAULT_REFRESH_THRESHOLD_SECONDS = 300;
 export const REFRESH_THRESHOLD_ENV = "AGENTBOARD_REFRESH_THRESHOLD_SECONDS";
 
 /**
+ * Why a re-login is needed when the stored token cannot rotate at all.
+ *
+ * Lives here because three places must agree on the exact bytes: the CLI and
+ * hook refresh paths that produce it, and the CLI display code that keys off it
+ * to avoid calling a legacy token a failed renewal. Mirrored in
+ * plugin/hooks/lib/refresh-policy.mjs.
+ */
+export const LEGACY_TOKEN_REASON = "stored token predates refresh support";
+
+/** Seven days. How far ahead a legacy token's expiry is worth mentioning. */
+export const DEFAULT_LEGACY_NOTICE_SECONDS = 7 * 24 * 60 * 60;
+export const LEGACY_NOTICE_ENV = "AGENTBOARD_LEGACY_NOTICE_SECONDS";
+
+/**
  * The configured pre-emptive window, in seconds.
  *
  * Verifying rotation end-to-end needs the server's access TTL at 60s. With the
@@ -88,4 +102,47 @@ export function shouldRefresh(
 ): boolean {
   if (accessExpiresAt === undefined) return false;
   return Math.floor(nowMs / 1000) >= accessExpiresAt - thresholdSeconds;
+}
+
+/**
+ * How long before a legacy token expires to start asking for a re-login.
+ *
+ * Deliberately not the access threshold. That one is sized for a one-hour
+ * access token and defaults to five minutes; a legacy token runs for 30 days,
+ * so reusing it would warn five minutes before collection breaks — far too
+ * late to be useful. A week gives the user room to act.
+ *
+ * No TTL cap either. The cap on the access threshold stops a misconfigured
+ * value from refreshing on every request; nothing here calls the server, so
+ * there is no request to protect.
+ */
+export function legacyNoticeSeconds(
+  env: NodeJS.ProcessEnv = process.env
+): number {
+  const raw = env[LEGACY_NOTICE_ENV];
+  // Same reading as the access threshold: empty means unset, not zero.
+  if (raw === undefined || raw.trim() === "") {
+    return DEFAULT_LEGACY_NOTICE_SECONDS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_LEGACY_NOTICE_SECONDS;
+  }
+  return Math.floor(parsed);
+}
+
+/**
+ * Whether a legacy (non-rotatable) token is close enough to expiry to warrant
+ * telling the user to log in again.
+ *
+ * Unknown expiry returns false: a token whose lifetime cannot be read gives no
+ * grounds for a warning, and guessing would cry wolf on every session.
+ */
+export function isLegacyNoticeDue(
+  accessExpiresAt: number | undefined,
+  noticeSeconds: number = legacyNoticeSeconds(),
+  nowMs: number = Date.now()
+): boolean {
+  if (accessExpiresAt === undefined) return false;
+  return Math.floor(nowMs / 1000) >= accessExpiresAt - noticeSeconds;
 }

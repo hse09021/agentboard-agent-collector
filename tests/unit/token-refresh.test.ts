@@ -164,11 +164,17 @@ describe("ensureFreshToken", () => {
     expect(outcome.kind).toBe("reauth_required");
   });
 
-  // 레거시 토큰은 회전할 수단이 없다. 만료 전까지는 그대로 쓰고(current),
-  // 실제로 갱신이 필요해진 시점에야 재로그인을 요구해야 한다 — 아직 멀쩡한
-  // 토큰을 두고 "로그인하라"고 하면 쓸데없이 사용자를 쫓아내는 셈이다.
-  it("leaves a legacy token alone and never calls the refresh endpoint", async () => {
-    await writeBundle({ v: 1, access: "legacy", access_expires_at: nowSec() + 10, refresh: null });
+  // 레거시 토큰은 회전할 수단이 없다. 만료가 한참 남았으면 그대로 쓰고(current),
+  // 만료가 임박해서야 재로그인을 요구한다 — 아직 멀쩡한 토큰을 두고 "로그인하라"고
+  // 하면 쓸데없이 사용자를 쫓아내는 셈이다.
+  it("leaves a healthy legacy token alone and never calls the refresh endpoint", async () => {
+    // 기본 통지 창(7일) 밖. 30일짜리 레거시 토큰의 평상시 상태다.
+    await writeBundle({
+      v: 1,
+      access: "legacy",
+      access_expires_at: nowSec() + 30 * 24 * 60 * 60,
+      refresh: null,
+    });
     const fetchSpy = mockFetch(() => jsonResponse({}));
 
     const { ensureFreshToken } = await import("../../src/api/token-refresh");
@@ -178,8 +184,69 @@ describe("ensureFreshToken", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  // 이슈 #7 의 본체. 이 분기는 예전에 isDueForRefresh() 의 not-due 조기 리턴 뒤에
+  // 있어 force 없이는 닿지 않았고, force 를 쓰지 않는 훅은 만료될 때까지 레거시
+  // 토큰을 멀쩡한 토큰으로 취급했다.
+  it("asks for a re-login once a legacy token nears expiry", async () => {
+    await writeBundle({
+      v: 1,
+      access: "legacy",
+      access_expires_at: nowSec() + 60 * 60, // 통지 창(7일) 안
+      refresh: null,
+    });
+    const fetchSpy = mockFetch(() => jsonResponse({}));
+
+    const { ensureFreshToken, LEGACY_TOKEN_REASON } = await import(
+      "../../src/api/token-refresh"
+    );
+    const outcome = await ensureFreshToken(API);
+
+    expect(outcome.kind).toBe("reauth_required");
+    if (outcome.kind === "reauth_required") {
+      expect(outcome.reason).toBe(LEGACY_TOKEN_REASON);
+    }
+    // 회전할 수단이 없으므로 서버를 부르지 않는다 — 불러봐야 401 이다.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  // 만료를 읽을 수 없으면 근거 없는 경고가 된다. 침묵이 맞다.
+  it("stays quiet for a legacy token whose expiry cannot be read", async () => {
+    await writeBundle({ v: 1, access: "opaque-no-exp", refresh: null });
+    const fetchSpy = mockFetch(() => jsonResponse({}));
+
+    const { ensureFreshToken } = await import("../../src/api/token-refresh");
+    const outcome = await ensureFreshToken(API);
+
+    expect(outcome.kind).toBe("current");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  // 통지 창은 access 임계값과 별개여야 한다. 30일짜리 토큰에 300초 임계값을 쓰면
+  // 수집이 끊기기 5분 전에 알리게 된다.
+  it("uses its own notice window, not the access threshold", async () => {
+    vi.stubEnv("AGENTBOARD_REFRESH_THRESHOLD_SECONDS", "300");
+    vi.stubEnv("AGENTBOARD_LEGACY_NOTICE_SECONDS", "86400");
+    await writeBundle({
+      v: 1,
+      access: "legacy",
+      access_expires_at: nowSec() + 12 * 60 * 60, // 300초 밖, 24시간 안
+      refresh: null,
+    });
+    mockFetch(() => jsonResponse({}));
+
+    const { ensureFreshToken } = await import("../../src/api/token-refresh");
+    expect((await ensureFreshToken(API)).kind).toBe("reauth_required");
+  });
+
+  // 401 이후의 force 경로. 서버가 방금 이 토큰을 거절했으므로 만료가 한참
+  // 남았든 말든 회복할 방법이 없다 — 통지 창과 무관하게 재로그인을 요구해야 한다.
   it("reports reauth_required when a legacy token is force-refreshed after a 401", async () => {
-    await writeBundle({ v: 1, access: "legacy", access_expires_at: nowSec() + 10, refresh: null });
+    await writeBundle({
+      v: 1,
+      access: "legacy",
+      access_expires_at: nowSec() + 30 * 24 * 60 * 60, // 통지 창 밖
+      refresh: null,
+    });
     const fetchSpy = mockFetch(() => jsonResponse({}));
 
     const { ensureFreshToken } = await import("../../src/api/token-refresh");
