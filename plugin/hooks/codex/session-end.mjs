@@ -24,6 +24,7 @@
 import { parseCodexSession } from './parse-codex.mjs';
 import { buildUsageEvent, buildUsageOnlyEvent } from './event.mjs';
 import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
+import { isRevokedDeviceError, revokedDeviceMessage } from '../lib/revoked.mjs';
 import {
   loadConfigV2,
   getSentTotals,
@@ -161,6 +162,10 @@ async function main() {
     }
     if (hasTokens) markTotalsSent('codex', sessionId, parsed, route.routeId);
   } catch (err) {
+    if (isRevokedDeviceError(err)) {
+      process.stderr.write(revokedDeviceMessage('agentboard-codex-sessionend'));
+      process.exit(1);
+    }
     process.stderr.write(`agentboard-codex-sessionend: upload failed: ${err.message}\n`);
     process.exit(1);
   }

@@ -60,6 +60,7 @@ import { recordAgentHomesFromEnv } from '../lib/agent-homes.mjs';
 import { isSweepEnabled, maybeSpawnSweep } from '../lib/sweep.mjs';
 import { splitSessionDelta, sumPieceTokens } from '../lib/daily-split.mjs';
 import { uploadEvents, registerDevice } from '../lib/transport.mjs';
+import { isRevokedDeviceError, revokedDeviceMessage } from '../lib/revoked.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
 import { parseClaudeSession } from './parse-claude.mjs';
 import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
@@ -364,6 +365,14 @@ async function main() {
     // A wiped or reinstalled server no longer knows this device. Nothing else
     // re-registers from the hook path, so without this every developer goes
     // silently dark until someone happens to run `agentboard login`.
+    // 403은 404와 정반대다. 기기가 사라진 게 아니라 사람이 끊은 것이므로
+    // 재등록을 시도해선 안 된다 — 그러면 revoke 가 무의미해진다.
+    if (isRevokedDeviceError(err)) {
+      workerLog('device revoked — halting, re-login required');
+      process.stderr.write(revokedDeviceMessage('agentboard-worker'));
+      process.exit(1);
+    }
+
     const deviceGone = /HTTP 404/.test(err.message) && /device_not_found/.test(err.message);
     if (!deviceGone) {
       workerLog(`ERROR: upload failed: ${err.message}`);

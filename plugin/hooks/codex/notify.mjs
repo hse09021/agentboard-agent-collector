@@ -16,6 +16,7 @@
 
 import { parseCodexFile, findCodexSessionFile } from './parse-codex.mjs';
 import { recordAgentHomesFromEnv } from '../lib/agent-homes.mjs';
+import { isRevokedDeviceError, revokedDeviceMessage } from '../lib/revoked.mjs';
 import { isSweepEnabled, maybeSpawnSweep } from '../lib/sweep.mjs';
 import { buildUsageEvent, buildUsageOnlyEvent } from './event.mjs';
 import {
@@ -240,6 +241,10 @@ async function main() {
       markTotalsSent('codex', sessionId, parsed, route.routeId);
     }
   } catch (err) {
+    if (isRevokedDeviceError(err)) {
+      process.stderr.write(revokedDeviceMessage('agentboard-codex'));
+      process.exit(1);
+    }
     process.stderr.write(`agentboard-codex: upload failed: ${err.message}\n`);
     process.exit(1);
   }

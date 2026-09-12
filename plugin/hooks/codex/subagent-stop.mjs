@@ -24,6 +24,7 @@ import {
   getSentTotals,
   markTotalsSent,
 } from '../lib/config.mjs';
+import { isRevokedDeviceError, revokedDeviceMessage } from '../lib/revoked.mjs';
 import { splitSessionDelta } from '../lib/daily-split.mjs';
 import { uploadEvents } from '../lib/transport.mjs';
 import { resolveUploadContext } from '../lib/upload-context.mjs';
@@ -123,6 +124,10 @@ async function main() {
     }
     markTotalsSent('codex', ledgerKey, parsed, route.routeId);
   } catch (err) {
+    if (isRevokedDeviceError(err)) {
+      process.stderr.write(revokedDeviceMessage('agentboard-codex-subagent'));
+      process.exit(1);
+    }
     process.stderr.write(`agentboard-codex-subagent: upload failed: ${err.message}\n`);
     process.exit(1);
   }
