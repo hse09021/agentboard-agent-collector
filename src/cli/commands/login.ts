@@ -1,7 +1,7 @@
 import * as readline from "readline";
 import { loadConfig, getOrCreateDeviceId, saveConfig } from "../../core/config";
 import { generateDeviceId } from "../../core/device-id";
-import { saveToken, hasToken } from "../../platform/credential-store";
+import { saveToken, loadTokenBundle } from "../../platform/credential-store";
 import { parsePastedToken, describePasteProblem } from "../paste-token";
 import { clearAuthFailure } from "../../core/auth-failure";
 import { detectOS } from "../../platform/os";
@@ -24,11 +24,35 @@ function prompt(question: string): Promise<string> {
 }
 
 export async function loginCommand(options: { force?: boolean } = {}): Promise<void> {
-  if (hasToken() && !options.force) {
+  const stored = loadTokenBundle();
+
+  // ★ "이미 로그인됨" 은 갱신 가능한 자격증명을 들고 있을 때만 참이다.
+  //
+  // 예전에는 hasToken() 으로, 즉 파일이 있는지만 보고 조기 리턴했다. 레거시
+  // 단일 JWT 를 들고 업그레이드한 사용자는 그 파일 때문에 여기서 막혔고,
+  // v=2 로그인 URL 이 화면에 뜰 기회 자체가 없었다. 레거시 토큰은 회전할 수
+  // 없으므로(refresh 가 없다) 스스로 새 형식으로 넘어갈 방법도 없다 —
+  // 만료되는 날 수집이 조용히 끊길 때까지 영영 레거시로 남는다.
+  //
+  // 그래서 레거시는 "로그인됨" 으로 치지 않고 그대로 흐름을 태운다.
+  if (stored?.refresh && !options.force) {
     logger.warn(
       "Already logged in. Run `agentboard login --force` to re-authenticate."
     );
     return;
+  }
+
+  const upgradingLegacy = Boolean(stored && !stored.refresh);
+
+  if (upgradingLegacy && !options.force) {
+    // 사용자는 방금 전까지 멀쩡히 쓰고 있었다. 이유 없이 재인증을 요구하면
+    // 버그로 읽히므로, 왜 다시 로그인해야 하는지 먼저 말한다.
+    logger.warn(
+      "This device is signed in with an older token that cannot be renewed " +
+        "automatically. Signing in again upgrades it — your usage history is " +
+        "not affected."
+    );
+    logger.plain("");
   }
 
   const config = loadConfig();
@@ -112,6 +136,14 @@ export async function loginCommand(options: { force?: boolean } = {}): Promise<v
       logger.error(
         `Login failed: could not reach ${config.api_base_url}. ` +
           "Token was not saved — check your connection and try again."
+      );
+    }
+    // 전환에 실패해도 기존 자격증명은 건드리지 않았다(저장은 등록 성공 뒤에만
+    // 한다). 레거시 사용자에게는 이 말이 중요하다 — 업그레이드하려다 로그아웃된
+    // 줄 알면 수집이 멀쩡한데도 손을 대게 된다.
+    if (upgradingLegacy) {
+      logger.plain(
+        chalk.dim("Your existing sign-in is unchanged — collection continues.")
       );
     }
     process.exit(1);
