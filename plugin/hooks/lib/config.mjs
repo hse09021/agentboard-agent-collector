@@ -9,8 +9,11 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmdirSync,
   statSync,
+  unlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { writeJsonAtomic } from './atomic-write.mjs';
@@ -166,13 +169,137 @@ export function getApiBaseUrl(config) {
   return stripTrailingSlash(migrateLegacyHost(config?.api_base_url ?? DEFAULT_API_URL));
 }
 
-export function loadToken() {
-  if (!existsSync(TOKEN_PATH)) return null;
+// ─── Token bundle (.token) ────────────────────────────────────────────────────
+//
+// Mirror of the TokenBundle half of src/platform/credential-store.ts. The hook
+// cannot import the built TypeScript, so the parsing branch exists twice and
+// the two must agree — docs/token-refresh.md is the contract.
+
+const TOKEN_FORMAT_VERSION = 1;
+
+function coerceUnixSeconds(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined;
+}
+
+/** Claims only, no signature check — same reasoning as src/core/jwt.ts. */
+export function decodeJwtClaims(token) {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
   try {
-    return readFileSync(TOKEN_PATH, 'utf-8').trim() || null;
+    const json = Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString(
+      'utf-8',
+    );
+    const claims = JSON.parse(json);
+    return typeof claims === 'object' && claims !== null ? claims : null;
   } catch {
     return null;
   }
+}
+
+function promoteLegacyToken(raw) {
+  return {
+    v: TOKEN_FORMAT_VERSION,
+    access: raw,
+    access_expires_at: coerceUnixSeconds(decodeJwtClaims(raw)?.exp),
+    refresh: null,
+  };
+}
+
+/**
+ * Parses either storage format. A leading `{` means the JSON bundle, anything
+ * else is a pre-0.10 single JWT. Unparseable JSON returns null rather than
+ * being treated as a legacy token — half a written file is not a credential.
+ *
+ * @param {string} contents
+ * @returns {{v:number, access:string, access_expires_at?:number,
+ *            refresh:string|null, refresh_expires_at?:number}|null}
+ */
+export function parseTokenFile(contents) {
+  const trimmed = (contents ?? '').trim();
+  if (!trimmed) return null;
+  if (!trimmed.startsWith('{')) return promoteLegacyToken(trimmed);
+
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  if (typeof parsed.access !== 'string' || !parsed.access) return null;
+
+  return {
+    v: typeof parsed.v === 'number' ? parsed.v : TOKEN_FORMAT_VERSION,
+    access: parsed.access,
+    access_expires_at: coerceUnixSeconds(parsed.access_expires_at),
+    refresh: typeof parsed.refresh === 'string' && parsed.refresh ? parsed.refresh : null,
+    refresh_expires_at: coerceUnixSeconds(parsed.refresh_expires_at),
+  };
+}
+
+export function serializeTokenBundle(bundle) {
+  return JSON.stringify(
+    {
+      v: bundle.v ?? TOKEN_FORMAT_VERSION,
+      access: bundle.access,
+      ...(bundle.access_expires_at !== undefined
+        ? { access_expires_at: bundle.access_expires_at }
+        : {}),
+      ...(bundle.refresh ? { refresh: bundle.refresh } : {}),
+      ...(bundle.refresh_expires_at !== undefined
+        ? { refresh_expires_at: bundle.refresh_expires_at }
+        : {}),
+    },
+    null,
+    2,
+  );
+}
+
+/** Reads the bundle for the default route, promoting a legacy single JWT. */
+export function loadTokenBundle() {
+  if (!existsSync(TOKEN_PATH)) return null;
+  try {
+    return parseTokenFile(readFileSync(TOKEN_PATH, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Atomic write: sibling temp file + rename, mode 0600.
+ *
+ * writeJsonAtomic is not reused because it re-serializes with
+ * JSON.stringify(value, null, 2) — which would be equivalent here, but the
+ * bundle's field order and its omit-when-absent rules live in
+ * serializeTokenBundle so that both runtimes emit byte-identical files.
+ */
+export function saveTokenBundle(bundle) {
+  mkdirSync(CONFIG_DIR, { recursive: true });
+  const tmpPath = `${TOKEN_PATH}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmpPath, serializeTokenBundle(bundle) + '\n', { mode: 0o600 });
+    renameSync(tmpPath, TOKEN_PATH);
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* best-effort */
+    }
+    throw err;
+  }
+}
+
+/**
+ * The access token for the default route.
+ *
+ * Keeps returning a bare string so existing callers are unchanged; callers that
+ * need to rotate use loadTokenBundle().
+ */
+export function loadToken() {
+  return loadTokenBundle()?.access ?? null;
 }
 
 // ─── Session-sent tracking ────────────────────────────────────────────────────
