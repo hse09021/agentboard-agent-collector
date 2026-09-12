@@ -16,9 +16,12 @@ vi.mock("readline", () => ({
   }),
 }));
 
+// 저장돼 있는 자격증명. 테스트마다 없음 / 레거시 / 정상 번들로 바꾼다.
+let storedBundle: { v: number; access: string; refresh: string | null } | null = null;
+
 vi.mock("../../src/platform/credential-store", () => ({
   saveToken: (token: unknown) => saveToken(token),
-  hasToken: () => false,
+  loadTokenBundle: () => storedBundle,
 }));
 
 vi.mock("../../src/core/auth-failure", () => ({
@@ -72,6 +75,7 @@ let exitSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  storedBundle = null;
   pastedValue = ACCESS_JWT;
   exitSpy = vi
     .spyOn(process, "exit")
@@ -87,10 +91,95 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function runLogin() {
+async function runLogin(options: { force?: boolean } = {}) {
   const { loginCommand } = await import("../../src/cli/commands/login");
-  return loginCommand();
+  return loginCommand(options);
 }
+
+/** console.warn/log 로 나간 모든 줄을 한 덩어리로. */
+function output(): string {
+  const calls = [
+    ...(console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls,
+    ...(console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls,
+  ];
+  return calls.map((args) => args.join(" ")).join("\n");
+}
+
+const LEGACY_STORED = { v: 1, access: "legacy-jwt", refresh: null };
+const ROTATABLE_STORED = { v: 1, access: "acc", refresh: "r1" };
+
+// ── 이슈 #6 ──────────────────────────────────────────────────────────────────
+// 업그레이드한 기존 사용자는 .token 에 레거시 JWT 가 있다는 이유로 조기 리턴에
+// 막혀, v=2 로그인 URL 을 볼 기회조차 없었다. 레거시는 회전할 수 없으므로
+// 스스로 새 형식으로 넘어갈 방법이 없다 — 만료까지 영영 레거시로 남는다.
+describe("loginCommand — 레거시 토큰에서 업그레이드", () => {
+  it("레거시 토큰이 저장돼 있으면 조기 리턴하지 않고 로그인을 진행한다", async () => {
+    storedBundle = LEGACY_STORED;
+    registerDevice.mockResolvedValue({});
+    pastedValue = JSON.stringify({ v: 1, access: ACCESS_JWT, refresh: "r_new" });
+
+    await runLogin();
+
+    // 실제로 전환됐는가 — 새 번들이 저장돼야 한다.
+    expect(saveToken).toHaveBeenCalledTimes(1);
+    expect(saveToken.mock.calls[0][0]).toMatchObject({ refresh: "r_new" });
+    expect(output()).not.toContain("Already logged in");
+  });
+
+  it("왜 다시 로그인해야 하는지 설명한다", async () => {
+    storedBundle = LEGACY_STORED;
+    registerDevice.mockResolvedValue({});
+    pastedValue = JSON.stringify({ v: 1, access: ACCESS_JWT, refresh: "r_new" });
+
+    await runLogin();
+
+    // 방금까지 멀쩡히 쓰던 사용자다. 이유 없는 재인증 요구는 버그로 읽힌다.
+    expect(output()).toMatch(/cannot be renewed automatically/i);
+  });
+
+  it("회전 가능한 번들이면 예전처럼 조기 리턴한다", async () => {
+    storedBundle = ROTATABLE_STORED;
+
+    await runLogin();
+
+    expect(output()).toContain("Already logged in");
+    expect(saveToken).not.toHaveBeenCalled();
+    expect(registerDevice).not.toHaveBeenCalled();
+  });
+
+  it("저장된 것이 없으면 예전처럼 진행한다", async () => {
+    storedBundle = null;
+    registerDevice.mockResolvedValue({});
+
+    await runLogin();
+
+    expect(output()).not.toContain("Already logged in");
+    expect(saveToken).toHaveBeenCalledTimes(1);
+  });
+
+  // 전환에 실패했다고 기존 자격증명을 잃으면 안 된다. 멀쩡히 돌던 수집이
+  // 업그레이드를 시도했다는 이유로 끊기는 셈이다.
+  it("전환에 실패해도 기존 토큰을 덮어쓰지 않는다", async () => {
+    storedBundle = LEGACY_STORED;
+    registerDevice.mockRejectedValue(new ApiError(401, "unauthorized"));
+    pastedValue = JSON.stringify({ v: 1, access: ACCESS_JWT, refresh: "r_new" });
+
+    await expect(runLogin()).rejects.toThrow(ExitError);
+
+    expect(saveToken).not.toHaveBeenCalled();
+    expect(output()).toMatch(/existing sign-in is unchanged/i);
+  });
+
+  it("--force 는 레거시 안내 없이 그대로 동작한다", async () => {
+    storedBundle = LEGACY_STORED;
+    registerDevice.mockResolvedValue({});
+
+    await runLogin({ force: true });
+
+    expect(saveToken).toHaveBeenCalledTimes(1);
+    expect(output()).not.toContain("Already logged in");
+  });
+});
 
 describe("loginCommand", () => {
   it("saves the token and registers the device on success", async () => {
