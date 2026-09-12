@@ -11,6 +11,8 @@
 
 import { loadConfigV2, loadRouteCredential, getSentRoute } from './config.mjs';
 import { resolveRoute } from './routing.mjs';
+import { ensureFreshToken } from './token-refresh.mjs';
+import { recordAuthFailure } from './auth-failure.mjs';
 
 /**
  * @param {{source: string, sessionId: string, cwd?: string|null}} input
@@ -49,4 +51,54 @@ export function resolveUploadContext({ source, sessionId, cwd }) {
     config,
     pinnedRoute,
   };
+}
+
+/**
+ * resolveUploadContext, plus a rotated access token when one is due.
+ *
+ * Refresh is scoped to the DEFAULT route (`credentialRef === null`, i.e. the
+ * `.token` bundle). A connected project's `.cred` is a separate enrollment
+ * credential that the server does not rotate and that is not part of any
+ * refresh family — sending it to the refresh endpoint would be an error, and
+ * worse, a confusing one to debug. So the branch is explicit rather than
+ * incidental.
+ *
+ * Never fails the upload over a refresh problem: a transient failure keeps the
+ * current token (it is usually still valid), and a permanently dead refresh
+ * token is recorded for the next CLI run to surface, because a hook has no
+ * stdout anyone reads.
+ *
+ * @param {{source: string, sessionId: string, cwd?: string|null}} input
+ * @param {(msg: string) => void} [log]
+ */
+export async function resolveUploadContextWithRefresh(input, log = () => {}) {
+  const context = resolveUploadContext(input);
+  if (!context.ok) return context;
+
+  if (context.route.credentialRef !== null) return context; // .cred route — never rotated
+
+  const outcome = await ensureFreshToken(context.apiBaseUrl);
+
+  if (outcome.kind === 'refreshed') {
+    log(`token refreshed (expires_at=${outcome.bundle.access_expires_at ?? 'unknown'})`);
+    return { ...context, token: outcome.bundle.access };
+  }
+  if (outcome.kind === 'current') {
+    return { ...context, token: outcome.bundle.access };
+  }
+  if (outcome.kind === 'reauth_required') {
+    // The refresh token is dead (90+ days offline, or the family was revoked).
+    // Upload anyway: the access token may have a little life left, and a 401
+    // here costs nothing beyond one request.
+    log(`refresh rejected: ${outcome.reason} — re-login required`);
+    recordAuthFailure({
+      reason: outcome.reason,
+      source: input.source,
+      apiBaseUrl: context.apiBaseUrl,
+    });
+    return context;
+  }
+
+  log(`refresh unavailable: ${outcome.reason} — continuing with current token`);
+  return context;
 }

@@ -56,6 +56,8 @@ import {
   COLLECTOR_VERSION,
 } from '../lib/config.mjs';
 import { resolveRoute } from '../lib/routing.mjs';
+import { ensureFreshToken } from '../lib/token-refresh.mjs';
+import { recordAuthFailure } from '../lib/auth-failure.mjs';
 import { recordAgentHomesFromEnv } from '../lib/agent-homes.mjs';
 import { isSweepEnabled, maybeSpawnSweep } from '../lib/sweep.mjs';
 import { splitSessionDelta, sumPieceTokens } from '../lib/daily-split.mjs';
@@ -239,11 +241,33 @@ async function main() {
 
   const apiBaseUrl = route.server.api_base_url;
   const deviceId = route.server.device_id ?? config.device_id;
-  const token = loadRouteCredential(route.credentialRef);
+  let token = loadRouteCredential(route.credentialRef);
 
   if (!token || !deviceId) {
     workerLog(`SKIP: no credential for route=${route.routeId} (not logged in / not connected)`);
     process.exit(0);
+  }
+
+  // 3.4 Rotate the access token if it is close to expiring.
+  //
+  // Only for the DEFAULT route (credentialRef === null, the `.token` bundle).
+  // A connected project's `.cred` is a separate enrollment credential that the
+  // server does not rotate — sending it to the refresh endpoint would fail.
+  //
+  // A refresh problem never blocks the upload: transient failures keep the
+  // current token, and a permanently dead refresh token is recorded for the
+  // next CLI run, since nobody reads a hook's stderr.
+  if (route.credentialRef === null) {
+    const outcome = await ensureFreshToken(apiBaseUrl);
+    if (outcome.kind === 'refreshed' || outcome.kind === 'current') {
+      token = outcome.bundle.access;
+      if (outcome.kind === 'refreshed') workerLog('token refreshed');
+    } else if (outcome.kind === 'reauth_required') {
+      workerLog(`refresh rejected: ${outcome.reason} — re-login required`);
+      recordAuthFailure({ reason: outcome.reason, source, apiBaseUrl });
+    } else {
+      workerLog(`refresh unavailable: ${outcome.reason} — continuing with current token`);
+    }
   }
 
   workerLog(`route=${route.routeId} api=${apiBaseUrl} pinned=${pinnedRoute ?? 'none'}`);

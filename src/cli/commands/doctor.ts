@@ -2,12 +2,22 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { loadConfig, getConfigDir, getHookSentPath } from "../../core/config";
-import { hasToken, loadToken, listCredentialRefs } from "../../platform/credential-store";
-import { describeTokenExpiry } from "../../core/jwt";
+import {
+  hasToken,
+  loadToken,
+  loadTokenBundle,
+  listCredentialRefs,
+} from "../../platform/credential-store";
+import {
+  describeCredential,
+  formatCredentialStatus,
+  isCredentialHealthy,
+} from "../../core/credential-status";
+import { readAuthFailure } from "../../core/auth-failure";
 import { loadConfigV2, findOrphans } from "../../core/bindings";
 import { scanAllGhostSessions, removeGhostSessions } from "../../core/ghost-sessions";
 import { listAgentHomes } from "../../core/agent-homes";
-import { createApiClient } from "../../api/client";
+import { createDefaultRouteClient } from "../../api/client";
 import { COLLECTOR_VERSION } from "../../core/usage-event";
 import { logger } from "../../core/logger";
 import chalk from "chalk";
@@ -54,19 +64,28 @@ async function runChecks(): Promise<CheckResult[]> {
       message: "Not logged in — run `agentboard login`",
     });
   } else {
-    const expiry = describeTokenExpiry(loadToken());
-    const described =
-      expiry.kind === "expired"
-        ? `Expired ${expiry.expiresAt.toISOString().slice(0, 10)} — run \`agentboard login\` again`
-        : expiry.kind === "expiring"
-          ? `Expires in ${expiry.daysLeft} day(s)`
-          : expiry.kind === "valid"
-            ? `Valid for ${expiry.daysLeft} more day(s)`
-            : "Present (opaque token — expiry unknown)";
+    // With rotation there is more to report than a single expiry date: an
+    // expired ACCESS token is normal between renewals, so what decides the
+    // verdict is whether renewal is still possible.
+    const status = describeCredential(loadTokenBundle());
     results.push({
       label: "Auth token",
-      ok: expiry.kind !== "expired",
-      message: described,
+      ok: isCredentialHealthy(status),
+      message: formatCredentialStatus(status),
+    });
+  }
+
+  // 1b. Authentication failures recorded by hooks.
+  //
+  // Hooks run in the background, so a refresh the server refused is invisible
+  // until something surfaces it here — otherwise collection just stops.
+  const authFailure = readAuthFailure();
+  if (authFailure) {
+    const when = authFailure.at ? authFailure.at.slice(0, 19).replace("T", " ") : "recently";
+    results.push({
+      label: "Hook auth",
+      ok: false,
+      message: `Renewal failed at ${when} (${authFailure.reason}) — run \`agentboard login\``,
     });
   }
 
@@ -100,7 +119,7 @@ async function runChecks(): Promise<CheckResult[]> {
   // 4. API connectivity
   const token = loadToken();
   if (token) {
-    const client = createApiClient(config.api_base_url, token);
+    const client = createDefaultRouteClient(config.api_base_url, token);
     const healthy = await client.checkHealth().catch(() => false);
     results.push({
       label: "API connectivity",

@@ -34,7 +34,7 @@ import {
 } from '../lib/config.mjs';
 import { splitSessionDelta } from '../lib/daily-split.mjs';
 import { uploadEvents } from '../lib/transport.mjs';
-import { resolveUploadContext } from '../lib/upload-context.mjs';
+import { resolveUploadContextWithRefresh } from '../lib/upload-context.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
 import { readStdin } from '../lib/read-stdin.mjs';
 import { recordAgentHomesFromEnv } from '../lib/agent-homes.mjs';
@@ -72,7 +72,7 @@ async function main() {
   // The route (and therefore the credential) depends on the working directory,
   // which the hook payload carries. Resolved here so every later step uses the
   // right server.
-  const ctx = resolveUploadContext({
+  const ctx = await resolveUploadContextWithRefresh({
     source: 'codex',
     sessionId: sessionId,
     cwd: payload.cwd,

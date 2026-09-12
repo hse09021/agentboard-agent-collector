@@ -59,7 +59,7 @@ import {
 import { loadScanCache, saveScanCache, isUnchanged, rememberScan, getCacheEntry } from './scan-cache.mjs';
 import { splitSessionDelta } from './daily-split.mjs';
 import { uploadEvents } from './transport.mjs';
-import { resolveUploadContext } from './upload-context.mjs';
+import { resolveUploadContextWithRefresh } from './upload-context.mjs';
 import { assertNoForbiddenFields } from './forbidden-data-guard.mjs';
 import { parseClaudeSession } from '../claude/parse-claude.mjs';
 import { parseCodexFile } from '../codex/parse-codex.mjs';
@@ -400,7 +400,7 @@ export async function sweepOneSession(candidate, ctx = {}) {
     if (pieces.length === 0) return { status: 'nodelta', sessionId };
 
     // Guardrail 4.
-    const uploadCtx = resolveUploadContext({ source, sessionId, cwd: parsed.cwd });
+    const uploadCtx = await resolveUploadContextWithRefresh({ source, sessionId, cwd: parsed.cwd });
     if (!uploadCtx.ok) {
       return { status: /credential/.test(uploadCtx.reason) ? 'nocred' : 'noroute', sessionId };
     }

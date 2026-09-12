@@ -2,6 +2,8 @@ import * as readline from "readline";
 import { loadConfig, getOrCreateDeviceId, saveConfig } from "../../core/config";
 import { generateDeviceId } from "../../core/device-id";
 import { saveToken, hasToken } from "../../platform/credential-store";
+import { parsePastedToken, describePasteProblem } from "../paste-token";
+import { clearAuthFailure } from "../../core/auth-failure";
 import { detectOS } from "../../platform/os";
 import { ApiError, createApiClient } from "../../api/client";
 import { COLLECTOR_VERSION } from "../../core/usage-event";
@@ -33,6 +35,10 @@ export async function loginCommand(options: { force?: boolean } = {}): Promise<v
   let deviceId = getOrCreateDeviceId();
   const loginUrl = new URL("/cli/login", config.app_base_url);
   loginUrl.searchParams.set("device_id", deviceId);
+  // v=2 asks for an access/refresh PAIR. The path itself is a public contract
+  // and does not change: a server that does not know the parameter simply
+  // serves the old single-JWT page, which parsePastedToken still accepts.
+  loginUrl.searchParams.set("v", "2");
 
   logger.plain("");
   logger.plain(chalk.bold("AgentBoard Login"));
@@ -45,11 +51,23 @@ export async function loginCommand(options: { force?: boolean } = {}): Promise<v
   logger.plain("2. Log in and copy the auth token shown on the page.");
   logger.plain("");
 
-  const token = await prompt("Paste your auth token here: ");
+  const pasted = await prompt("Paste your auth token here: ");
 
-  if (!token) {
-    logger.error("No token provided. Login cancelled.");
+  const parsed = parsePastedToken(pasted);
+  if (!parsed.ok) {
+    logger.error(describePasteProblem(parsed.problem));
     process.exit(1);
+  }
+  const bundle = parsed.bundle;
+  const token = bundle.access;
+
+  if (!bundle.refresh) {
+    // An older server, or the legacy login page. Collection still works; it
+    // just stops when the token expires instead of rotating.
+    logger.warn(
+      "This server issued a token without automatic renewal — you will need to " +
+        "run `agentboard login` again when it expires."
+    );
   }
 
   // 토큰은 서버가 받아준 뒤에만 저장한다. 먼저 저장해 버리면 인증에 실패해도
@@ -99,8 +117,11 @@ export async function loginCommand(options: { force?: boolean } = {}): Promise<v
     process.exit(1);
   }
 
-  saveToken(token);
+  saveToken(bundle);
   saveConfig({ device_id: deviceId });
+  // A successful login is exactly what a recorded hook auth failure was asking
+  // for, so drop it rather than leave status/doctor warning about a fixed problem.
+  clearAuthFailure();
   logger.success("Device registered with AgentBoard.");
 
   logger.plain("");

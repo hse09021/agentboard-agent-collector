@@ -6,17 +6,37 @@ const saveToken = vi.fn();
 const saveConfig = vi.fn();
 const registerDevice = vi.fn();
 
+// 붙여넣는 값은 테스트마다 바뀐다(단일 JWT / 토큰 쌍 JSON / base64 / 깨진 입력).
+let pastedValue = "";
+
 vi.mock("readline", () => ({
   createInterface: () => ({
-    question: (_q: string, cb: (answer: string) => void) => cb("pasted-token"),
+    question: (_q: string, cb: (answer: string) => void) => cb(pastedValue),
     close: () => {},
   }),
 }));
 
 vi.mock("../../src/platform/credential-store", () => ({
-  saveToken: (token: string) => saveToken(token),
+  saveToken: (token: unknown) => saveToken(token),
   hasToken: () => false,
 }));
+
+vi.mock("../../src/core/auth-failure", () => ({
+  clearAuthFailure: () => {},
+}));
+
+/** 서명은 검증되지 않으므로 claims 만 맞으면 된다. */
+function makeJwt(claims: Record<string, unknown>): string {
+  const b64 = (o: unknown) =>
+    Buffer.from(JSON.stringify(o))
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+  return `${b64({ alg: "HS256", typ: "JWT" })}.${b64(claims)}.sig`;
+}
+
+const ACCESS_JWT = makeJwt({ sub: "u1", iat: 1_760_000_000, exp: 1_760_003_600 });
 
 vi.mock("../../src/core/config", () => ({
   loadConfig: () => ({
@@ -52,6 +72,7 @@ let exitSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  pastedValue = ACCESS_JWT;
   exitSpy = vi
     .spyOn(process, "exit")
     .mockImplementation(((code?: number) => {
@@ -81,7 +102,9 @@ describe("loginCommand", () => {
     await runLogin();
 
     expect(registerDevice).toHaveBeenCalledOnce();
-    expect(saveToken).toHaveBeenCalledWith("pasted-token");
+    expect(saveToken).toHaveBeenCalledWith(
+      expect.objectContaining({ access: ACCESS_JWT, refresh: null })
+    );
     expect(saveConfig).toHaveBeenCalledWith({ device_id: "dev_test" });
     expect(exitSpy).not.toHaveBeenCalled();
   });
@@ -146,7 +169,9 @@ describe("loginCommand", () => {
     expect(registerDevice).toHaveBeenCalledTimes(2);
     expect(registerDevice.mock.calls[0][0].device_id).toBe("dev_test");
     expect(registerDevice.mock.calls[1][0].device_id).toBe("dev_fresh");
-    expect(saveToken).toHaveBeenCalledWith("pasted-token");
+    expect(saveToken).toHaveBeenCalledWith(
+      expect.objectContaining({ access: ACCESS_JWT })
+    );
     expect(saveConfig).toHaveBeenCalledWith({ device_id: "dev_fresh" });
     expect(exitSpy).not.toHaveBeenCalled();
   });
@@ -171,5 +196,88 @@ describe("loginCommand", () => {
 
     expect(registerDevice).toHaveBeenCalledOnce();
     expect(saveConfig).not.toHaveBeenCalled();
+  });
+
+  // ─── v=2 토큰 쌍 붙여넣기 ──────────────────────────────────────────────────
+
+  it("stores the refresh token when the server issues a pair", async () => {
+    pastedValue = JSON.stringify({
+      v: 1,
+      access: ACCESS_JWT,
+      access_expires_at: 1_760_003_600,
+      refresh: "opaque-refresh",
+      refresh_expires_at: 1_768_000_000,
+    });
+    registerDevice.mockResolvedValue({
+      device_id: "dev_test",
+      registered_at: "2026-01-01T00:00:00Z",
+    });
+
+    await runLogin();
+
+    expect(saveToken).toHaveBeenCalledWith(
+      expect.objectContaining({
+        access: ACCESS_JWT,
+        refresh: "opaque-refresh",
+        access_expires_at: 1_760_003_600,
+        refresh_expires_at: 1_768_000_000,
+      })
+    );
+  });
+
+  // 한 줄 JSON 은 복사하다 잘리기 쉬워서 로그인 페이지가 base64 로 감쌀 수 있다.
+  it("accepts a base64-wrapped token pair", async () => {
+    pastedValue = Buffer.from(
+      JSON.stringify({ v: 1, access: ACCESS_JWT, refresh: "opaque-refresh" })
+    ).toString("base64");
+    registerDevice.mockResolvedValue({
+      device_id: "dev_test",
+      registered_at: "2026-01-01T00:00:00Z",
+    });
+
+    await runLogin();
+
+    expect(saveToken).toHaveBeenCalledWith(
+      expect.objectContaining({ access: ACCESS_JWT, refresh: "opaque-refresh" })
+    );
+  });
+
+  // 잘린 붙여넣기를 토큰으로 취급해 저장하면, 인증은 실패하는데 hasToken()은
+  // true 가 되어 "로그인됨"으로 보인다. 서버에 보내기 전에 멈춰야 한다.
+  it("rejects a truncated paste without contacting the server", async () => {
+    pastedValue = '{"v":1,"access":"eyJ';
+
+    await expect(runLogin()).rejects.toThrow(ExitError);
+
+    expect(registerDevice).not.toHaveBeenCalled();
+    expect(saveToken).not.toHaveBeenCalled();
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  it("rejects an empty paste", async () => {
+    pastedValue = "   ";
+
+    await expect(runLogin()).rejects.toThrow(ExitError);
+
+    expect(registerDevice).not.toHaveBeenCalled();
+    expect(saveToken).not.toHaveBeenCalled();
+  });
+
+  it("asks for v=2 so the server issues a pair", async () => {
+    registerDevice.mockResolvedValue({
+      device_id: "dev_test",
+      registered_at: "2026-01-01T00:00:00Z",
+    });
+    const printed: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      printed.push(String(chunk));
+      return true;
+    });
+
+    await runLogin();
+
+    const url = printed.concat((console.log as unknown as { mock?: { calls: unknown[][] } }).mock?.calls.flat().map(String) ?? []).join("\n");
+    expect(url).toContain("v=2");
+    expect(url).toContain("device_id=dev_test");
   });
 });
