@@ -109,6 +109,36 @@ async function runChecks(): Promise<CheckResult[]> {
         ? `${config.api_base_url} reachable`
         : `Cannot reach ${config.api_base_url}`,
     });
+
+    // 연결이 끊긴 기기는 업로드할 때만 403으로 드러난다. 훅이 조용히 죽어 있으면
+    // 사용자는 대시보드가 왜 멈췄는지 알 길이 없으므로 여기서 먼저 알려준다.
+    if (healthy) {
+      const deviceId = config.device_id;
+      const devices = await client.getDevices().catch(() => null);
+      const thisDevice = devices?.find((d) => d.device_id === deviceId);
+
+      if (devices === null) {
+        results.push({
+          label: "Device registration",
+          ok: false,
+          message: "Could not read the device list from the server",
+        });
+      } else if (!deviceId || !thisDevice) {
+        results.push({
+          label: "Device registration",
+          ok: false,
+          message: "This device is not registered — run `agentboard login`",
+        });
+      } else {
+        results.push({
+          label: "Device registration",
+          ok: !thisDevice.revoked,
+          message: thisDevice.revoked
+            ? "Disconnected in AgentBoard — run `agentboard login` to reconnect"
+            : `Registered${thisDevice.last_usage_at ? "" : " (no usage uploaded yet)"}`,
+        });
+      }
+    }
   } else {
     results.push({
       label: "API connectivity",

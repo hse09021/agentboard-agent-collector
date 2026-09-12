@@ -39,3 +39,15 @@ export interface UsageBySource {
   estimated_cost_usd: number;
   percentage: number;
 }
+
+/** GET /v1/me/collector/devices — 이 계정에 등록된 기기 한 대. */
+export interface CollectorDeviceSummary {
+  device_id: string;
+  name: string | null;
+  os: string | null;
+  collector_version: string | null;
+  last_seen_at: string | null;
+  last_usage_at: string | null;
+  created_at: string;
+  revoked: boolean;
+}

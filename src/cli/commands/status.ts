@@ -188,6 +188,21 @@ export async function statusCommand(): Promise<void> {
   const token = loadToken();
   const client = createApiClient(config.api_base_url, token!);
 
+  // 연결이 끊긴 기기는 사용량 숫자가 멀쩡히 보여도(토큰은 살아 있으므로) 더 이상
+  // 수집되지 않는다. 숫자보다 먼저 알려야 "왜 어제부터 안 늘지"를 헤매지 않는다.
+  const thisDevice = await client
+    .getDevices()
+    .then((devices) => devices.find((d) => d.device_id === config.device_id))
+    .catch(() => undefined);
+
+  if (thisDevice?.revoked) {
+    logger.warn(
+      "This device was disconnected in AgentBoard — usage is no longer being recorded."
+    );
+    logger.plain(chalk.dim("Run `agentboard login` to reconnect."));
+    logger.plain("");
+  }
+
   logger.plain(chalk.bold("Token Usage"));
   logger.plain("─".repeat(40));
   logger.plain("");

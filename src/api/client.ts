@@ -3,6 +3,7 @@ import {
   RegisterDeviceResponse,
   UsageSummary,
   UsageBySource,
+  CollectorDeviceSummary,
 } from "./types";
 import { COLLECTOR_VERSION } from "../core/usage-event";
 
@@ -55,6 +56,17 @@ export class ApiClient {
     );
   }
 
+
+  /**
+   * 이 계정의 기기 목록. doctor/status 가 "이 기기가 대시보드에서 끊겼는지"를
+   * 알아내는 유일한 경로다 — 업로드를 실제로 시도하기 전에는 403을 볼 수 없다.
+   */
+  async getDevices(): Promise<CollectorDeviceSummary[]> {
+    return this.request<CollectorDeviceSummary[]>(
+      "GET",
+      "/v1/me/collector/devices"
+    );
+  }
 
   async checkHealth(): Promise<boolean> {
     try {
