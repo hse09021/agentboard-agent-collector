@@ -29,7 +29,7 @@ export async function loginCommand(options: { force?: boolean } = {}): Promise<v
   // ★ "이미 로그인됨" 은 갱신 가능한 자격증명을 들고 있을 때만 참이다.
   //
   // 예전에는 hasToken() 으로, 즉 파일이 있는지만 보고 조기 리턴했다. 레거시
-  // 단일 JWT 를 들고 업그레이드한 사용자는 그 파일 때문에 여기서 막혔고,
+  // 단일 JWT를 들고 업그레이드한 사용자는 그 파일 때문에 여기서 막혔고,
   // v=2 로그인 URL 이 화면에 뜰 기회 자체가 없었다. 레거시 토큰은 회전할 수
   // 없으므로(refresh 가 없다) 스스로 새 형식으로 넘어갈 방법도 없다 —
   // 만료되는 날 수집이 조용히 끊길 때까지 영영 레거시로 남는다.
@@ -108,11 +108,11 @@ export async function loginCommand(options: { force?: boolean } = {}): Promise<v
     try {
       await register(deviceId);
     } catch (err) {
-      // 이 기기가 대시보드에서 연결 해제된 경우. 서버는 같은 device_id 의 재등록을
+      // 이 기기가 대시보드에서 연결 해제된 경우. 서버는 같은 device_id의 재등록을
       // 영구히 거부하므로(revoke 가 되돌려지면 안 되니까) 새 id 로 연결해야 한다.
       //
       // 훅에서는 절대 하면 안 되는 일이지만 여기서는 맞다 — 사람이 방금 브라우저에서
-      // 다시 인증했고, 그게 revoke 를 되돌릴 자격을 가진 유일한 행위다.
+      // 다시 인증했고, 그게 revoke를 되돌릴 자격을 가진 유일한 행위다.
       if (!(err instanceof ApiError) || err.code !== "revoked_device") throw err;
 
       logger.warn(

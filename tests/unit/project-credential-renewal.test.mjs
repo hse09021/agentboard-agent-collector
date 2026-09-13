@@ -79,7 +79,7 @@ describe('isProjectRenewalDue', () => {
     expect(isProjectRenewalDue(claims(1), NOW, {})).toBe(true);
   });
 
-  // ★ 서버 TTL 을 줄여 갱신을 검증할 때, 상한이 없으면 30일 창이 수명 전체를 덮어
+  // ★ 서버 TTL을 줄여 갱신을 검증할 때, 상한이 없으면 30일 창이 수명 전체를 덮어
   //   업로드마다 갱신한다.
   it('caps the window at a third of the lifetime', async () => {
     const { isProjectRenewalDue } = await import('../../plugin/hooks/lib/refresh-policy.mjs');

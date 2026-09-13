@@ -87,7 +87,7 @@ describe('hook loadToken / loadTokenBundle', () => {
     expect(config.loadTokenBundle().refresh).toBe('ref');
   });
 
-  // loadRouteCredential 은 기본 라우트(credentialRef 없음)일 때만 .token 을 읽는다.
+  // loadRouteCredential 은 기본 라우트(credentialRef 없음)일 때만 .token을 읽는다.
   it('loadRouteCredential falls back to the bundle for the default route', () => {
     writeFileSync(
       join(configDir, '.token'),

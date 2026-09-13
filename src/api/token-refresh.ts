@@ -44,10 +44,10 @@ export type RefreshOutcome =
  *
  * ★ 요청 본문의 키는 `refresh_token` 이고, 응답의 키는 `refresh` 다. 이름이
  *   다르다는 사실이 이 파일의 유일한 함정이다 — 응답만 보고 요청도 `refresh`
- *   일 것이라 넘겨짚으면 서버가 400(ZodError) 을 돌려주는데, 400 은 아래에서
+ *   일 것이라 넘겨짚으면 서버가 400(ZodError)을 돌려주는데, 400 은 아래에서
  *   `unavailable`(일시적 오류) 로 분류되어 조용히 삼켜진다. 그래서 로테이션이
  *   한 번도 돌지 않는데 아무 에러도 보이지 않는 상태가 된다.
- *   서버 스키마: api/src/modules/auth/routes/token.ts 의 bodySchema.
+ *   서버 스키마: api/src/modules/auth/routes/token.ts의 bodySchema.
  */
 function refreshUrl(apiBaseUrl: string): string {
   return `${apiBaseUrl.replace(/\/$/, "")}/v1/auth/token/refresh`;

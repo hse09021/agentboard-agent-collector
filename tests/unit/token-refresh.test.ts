@@ -186,8 +186,8 @@ describe("ensureFreshToken", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  // 이슈 #7 의 본체. 이 분기는 예전에 isDueForRefresh() 의 not-due 조기 리턴 뒤에
-  // 있어 force 없이는 닿지 않았고, force 를 쓰지 않는 훅은 만료될 때까지 레거시
+  // 이슈 #7의 본체. 이 분기는 예전에 isDueForRefresh()의 not-due 조기 리턴 뒤에
+  // 있어 force 없이는 닿지 않았고, force를 쓰지 않는 훅은 만료될 때까지 레거시
   // 토큰을 멀쩡한 토큰으로 취급했다.
   it("asks for a re-login once a legacy token nears expiry", async () => {
     await writeBundle({
@@ -258,7 +258,7 @@ describe("ensureFreshToken", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  // 서버가 access 만 주고 refresh 를 회전시키지 않을 수 있다. 그때 기존 refresh 를
+  // 서버가 access 만 주고 refresh를 회전시키지 않을 수 있다. 그때 기존 refresh 를
   // 버리면 다음 갱신이 영영 불가능해진다.
   it("carries the old refresh token forward when the server does not rotate it", async () => {
     await writeBundle({
@@ -312,7 +312,7 @@ describe("ensureFreshToken", () => {
     expect(fetchSpy).toHaveBeenCalledOnce();
   });
 
-  // 같은 refresh 를 두 번 제출하면 서버가 탈취로 보고 family 를 폐기한다.
+  // 같은 refresh를 두 번 제출하면 서버가 탈취로 보고 family를 폐기한다.
   // 락 안에서 파일을 다시 읽어, 이미 다른 프로세스가 갱신했으면 그 결과를 쓴다.
   it("submits the refresh token only once across concurrent callers", async () => {
     await writeBundle({
@@ -382,9 +382,9 @@ describe("revokeRefreshToken", () => {
     expect(result.reason).toContain("offline");
   });
 
-  // ★ 서버 스키마(api .../routes/token.ts)는 요청에서 refresh_token 을 요구한다.
+  // ★ 서버 스키마(api .../routes/token.ts)는 요청에서 refresh_token을 요구한다.
   //   응답 필드는 refresh 라 이름이 어긋나는데, 요청을 refresh 로 보내면 서버가
-  //   400(ZodError) 을 돌려주고 그 400 은 unavailable 로 분류되어 조용히 삼켜진다.
+  //   400(ZodError)을 돌려주고 그 400 은 unavailable 로 분류되어 조용히 삼켜진다.
   //   로테이션이 한 번도 돌지 않는데 에러도 안 보이는 상태였으므로, 키 이름 자체를
   //   고정한다. URL 만 검증하던 기존 테스트는 이 버그를 통과시켰다.
   it("sends the refresh token under the key the server requires", async () => {

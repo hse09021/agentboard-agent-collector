@@ -45,7 +45,7 @@ async function writeBundle(bundle) {
 
 describe('hook ensureFreshToken', () => {
   // ── 레거시 토큰 (이슈 #7) ────────────────────────────────────────────────
-  // 훅은 force 를 쓰지 않는다. 그래서 레거시 분기가 not-due 조기 리턴 뒤에 있던
+  // 훅은 force를 쓰지 않는다. 그래서 레거시 분기가 not-due 조기 리턴 뒤에 있던
   // 동안 이 경로는 통째로 죽어 있었고, 훅은 회전 불가능한 토큰을 멀쩡한 토큰으로
   // 취급하다가 만료와 함께 조용히 업로드를 잃었다.
   it('leaves a healthy legacy token alone', async () => {
@@ -147,7 +147,7 @@ describe('hook ensureFreshToken', () => {
     expect((await ensureFreshToken(API)).kind).toBe('reauth_required');
   });
 
-  // 훅 두 개가 같은 refresh 를 동시에 제출하면 서버가 탈취로 보고 로그아웃시킨다.
+  // 훅 두 개가 같은 refresh를 동시에 제출하면 서버가 탈취로 보고 로그아웃시킨다.
   it('submits the refresh token only once across concurrent callers', async () => {
     await writeBundle({ v: 1, access: 'old', access_expires_at: nowSec() + 30, refresh: 'r1' });
     const fetchSpy = vi.fn(async () => {
@@ -258,7 +258,7 @@ describe('resolveUploadContextWithRefresh', () => {
     expect(ctx.token).toBe('old');
   });
 
-  // 훅은 백그라운드라 사용자가 401 을 못 본다. 파일로 남겨야 다음 CLI 실행에서 보인다.
+  // 훅은 백그라운드라 사용자가 401을 못 본다. 파일로 남겨야 다음 CLI 실행에서 보인다.
   it('records a rejected refresh for the next CLI run to surface', async () => {
     writeConfig();
     await writeBundle({ v: 1, access: 'old', access_expires_at: nowSec() + 30, refresh: 'r1' });

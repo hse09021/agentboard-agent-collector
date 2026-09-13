@@ -79,7 +79,7 @@ describe("default-route client", () => {
     expect(deviceCalls).toBe(2);
   });
 
-  // 401 을 계속 주는 서버에서 무한 루프에 빠지면 rate limit에 걸린다.
+  // 401을 계속 주는 서버에서 무한 루프에 빠지면 rate limit에 걸린다.
   it("gives up after one retry when the 401 persists", async () => {
     await writeBundle({
       v: 1,

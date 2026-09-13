@@ -62,7 +62,7 @@ jobs:
               // 저장소에 쓰기 권한이 없는 사람은 담당자로 지정할 수 없다.
               // 외부 기여자의 이슈가 여기 해당한다. 실패해도 워크플로를
               // 실패시키지 않는다 — 담당자 지정은 편의 기능일 뿐이다.
-              core.warning(`${author} 를 담당자로 지정하지 못했습니다: ${err.message}`);
+              core.warning(`${author}를 담당자로 지정하지 못했습니다: ${err.message}`);
             }
 
   # ── 2) `ready` 라벨이 붙으면 작업 브랜치 생성 ───────────────────────
@@ -155,7 +155,7 @@ jobs:
               `git checkout ${branch}`,
               '```',
               '',
-              `PR을 열 때 본문에 \`Closes #${issue.number}\` 를 넣으면 머지와 함께 이 이슈가 닫힙니다.`,
+              `PR을 열 때 본문에 \`Closes #${issue.number}\`를 넣으면 머지와 함께 이 이슈가 닫힙니다.`,
             ].join('\n');
 
             await github.rest.issues.createComment({

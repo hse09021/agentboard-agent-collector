@@ -84,7 +84,7 @@ agentboard login
 
 0.9.x 이하에서 저장된 단일 토큰도 그대로 읽히므로 업데이트 직후 다시 로그인할 필요는 없습니다.
 다만 그 토큰에는 refresh 가 없어 만료되면 수집이 멈춥니다. `agentboard status` 가 이를
-"no automatic renewal" 로 표시하며, `agentboard login` 을 한 번 다시 실행하면 갱신되는
+"no automatic renewal" 로 표시하며, `agentboard login`을 한 번 다시 실행하면 갱신되는
 형식으로 전환됩니다.
 
 갱신 시점은 기본적으로 만료 5분 전입니다. `AGENTBOARD_REFRESH_THRESHOLD_SECONDS` 로 조정할 수
