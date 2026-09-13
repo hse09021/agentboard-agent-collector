@@ -58,6 +58,7 @@ import {
 import { resolveRoute } from '../lib/routing.mjs';
 import { ensureFreshToken } from '../lib/token-refresh.mjs';
 import { recordAuthFailure } from '../lib/auth-failure.mjs';
+import { ensureFreshProjectCredential } from '../lib/project-credential.mjs';
 import { recordAgentHomesFromEnv } from '../lib/agent-homes.mjs';
 import { isSweepEnabled, maybeSpawnSweep } from '../lib/sweep.mjs';
 import { splitSessionDelta, sumPieceTokens } from '../lib/daily-split.mjs';
@@ -248,15 +249,17 @@ async function main() {
     process.exit(0);
   }
 
-  // 3.4 Rotate the access token if it is close to expiring.
+  // 3.4 Rotate the access token, or renew the project credential, if it is close
+  //     to expiring.
   //
-  // Only for the DEFAULT route (credentialRef === null, the `.token` bundle).
-  // A connected project's `.cred` is a separate enrollment credential that the
-  // server does not rotate — sending it to the refresh endpoint would fail.
+  // The DEFAULT route (credentialRef === null, the `.token` bundle) rotates
+  // through the refresh endpoint. A connected project's `.cred` is a separate
+  // enrollment credential — sending it to the refresh endpoint would fail — so
+  // it renews through /v1/collector/renew instead.
   //
-  // A refresh problem never blocks the upload: transient failures keep the
-  // current token, and a permanently dead refresh token is recorded for the
-  // next CLI run, since nobody reads a hook's stderr.
+  // Neither ever blocks the upload: transient failures keep the current
+  // credential, and a permanent refusal is recorded for the next CLI run, since
+  // nobody reads a hook's stderr.
   if (route.credentialRef === null) {
     const outcome = await ensureFreshToken(apiBaseUrl);
     if (outcome.kind === 'refreshed' || outcome.kind === 'current') {
@@ -267,6 +270,17 @@ async function main() {
       recordAuthFailure({ reason: outcome.reason, source, apiBaseUrl });
     } else {
       workerLog(`refresh unavailable: ${outcome.reason} — continuing with current token`);
+    }
+  } else {
+    const renewal = await ensureFreshProjectCredential({
+      apiBaseUrl,
+      credentialRef: route.credentialRef,
+      credential: token,
+      deviceId,
+    });
+    token = renewal.credential;
+    if (renewal.kind !== 'current') {
+      workerLog(`project credential ${renewal.kind}${renewal.reason ? `: ${renewal.reason}` : ''}`);
     }
   }
 

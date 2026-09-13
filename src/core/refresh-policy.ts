@@ -146,3 +146,47 @@ export function isLegacyNoticeDue(
   if (accessExpiresAt === undefined) return false;
   return Math.floor(nowMs / 1000) >= accessExpiresAt - noticeSeconds;
 }
+
+/**
+ * Thirty days. How far ahead of expiry a connected project's credential is
+ * renewed. With the server's default 90-day lifetime this equals the ttl/3
+ * cap, so a machine used at least once a month never sees its connection
+ * expire. See "Project credentials" in docs/token-refresh.md.
+ */
+export const DEFAULT_PROJECT_RENEW_THRESHOLD_SECONDS = 30 * 24 * 60 * 60;
+export const PROJECT_RENEW_THRESHOLD_ENV = "AGENTBOARD_PROJECT_RENEW_THRESHOLD_SECONDS";
+
+export function configuredProjectRenewThresholdSeconds(
+  env: NodeJS.ProcessEnv = process.env
+): number {
+  const raw = env[PROJECT_RENEW_THRESHOLD_ENV];
+  // Same reading as the access threshold: empty means unset, not zero.
+  if (raw === undefined || raw.trim() === "") {
+    return DEFAULT_PROJECT_RENEW_THRESHOLD_SECONDS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_PROJECT_RENEW_THRESHOLD_SECONDS;
+  }
+  return Math.floor(parsed);
+}
+
+/**
+ * Whether a project credential is inside its renewal window.
+ *
+ * Capped at a third of the lifetime, like the access threshold: verifying
+ * renewal means shortening the server TTL, and an uncapped 30-day window would
+ * then renew on every upload. Unknown expiry means no renewal.
+ */
+export function isProjectRenewalDue(
+  claims: { iat?: unknown; exp?: unknown } | null | undefined,
+  nowMs: number = Date.now(),
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  const exp = typeof claims?.exp === "number" ? claims.exp : undefined;
+  const threshold = effectiveThresholdSeconds(
+    tokenTtlSeconds(claims ?? {}),
+    configuredProjectRenewThresholdSeconds(env)
+  );
+  return shouldRefresh(exp, threshold, nowMs);
+}

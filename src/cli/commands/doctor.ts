@@ -4,10 +4,12 @@ import * as os from "os";
 import { loadConfig, getConfigDir, getHookSentPath } from "../../core/config";
 import {
   hasToken,
+  loadCredential,
   loadToken,
   loadTokenBundle,
   listCredentialRefs,
 } from "../../platform/credential-store";
+import { reportProjectCredentials } from "../../core/project-credential-status";
 import {
   describeCredential,
   formatCredentialStatus,
@@ -314,6 +316,16 @@ async function runChecks(): Promise<CheckResult[]> {
         : `${orphans.bindingsWithoutCredential.length} binding(s) missing a credential, ` +
           `${orphans.credentialsWithoutBinding.length} unused credential(s)`,
   });
+
+  // 8b. Connected project credentials
+  //
+  // Hooks renew them before they expire. What is left to catch is a machine
+  // that went unused past the expiry, and a renewal the server refused (revoked
+  // device, left the organization, archived project) — both of which otherwise
+  // end collection without a single visible error.
+  for (const row of reportProjectCredentials(v2.bindings, loadCredential)) {
+    results.push({ label: `Project ${row.label}`, ok: row.ok, message: row.message });
+  }
 
   // 9. Leftover /usage transcripts
   //

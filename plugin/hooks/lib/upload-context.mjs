@@ -13,6 +13,7 @@ import { loadConfigV2, loadRouteCredential, getSentRoute } from './config.mjs';
 import { resolveRoute } from './routing.mjs';
 import { ensureFreshToken } from './token-refresh.mjs';
 import { recordAuthFailure } from './auth-failure.mjs';
+import { ensureFreshProjectCredential } from './project-credential.mjs';
 
 /**
  * @param {{source: string, sessionId: string, cwd?: string|null}} input
@@ -54,14 +55,15 @@ export function resolveUploadContext({ source, sessionId, cwd }) {
 }
 
 /**
- * resolveUploadContext, plus a rotated access token when one is due.
+ * resolveUploadContext, plus a rotated access token or a renewed project
+ * credential when one is due.
  *
- * Refresh is scoped to the DEFAULT route (`credentialRef === null`, i.e. the
- * `.token` bundle). A connected project's `.cred` is a separate enrollment
- * credential that the server does not rotate and that is not part of any
- * refresh family — sending it to the refresh endpoint would be an error, and
- * worse, a confusing one to debug. So the branch is explicit rather than
- * incidental.
+ * The two routes renew differently, so the branch is explicit rather than
+ * incidental. The DEFAULT route (`credentialRef === null`, the `.token` bundle)
+ * rotates through the refresh endpoint. A connected project's `.cred` is a
+ * separate enrollment credential that is not part of any refresh family —
+ * sending it to the refresh endpoint would be an error, and a confusing one to
+ * debug — so it renews through /v1/collector/renew instead.
  *
  * Never fails the upload over a refresh problem: a transient failure keeps the
  * current token (it is usually still valid), and a permanently dead refresh
@@ -75,7 +77,18 @@ export async function resolveUploadContextWithRefresh(input, log = () => {}) {
   const context = resolveUploadContext(input);
   if (!context.ok) return context;
 
-  if (context.route.credentialRef !== null) return context; // .cred route — never rotated
+  if (context.route.credentialRef !== null) {
+    const renewal = await ensureFreshProjectCredential({
+      apiBaseUrl: context.apiBaseUrl,
+      credentialRef: context.route.credentialRef,
+      credential: context.token,
+      deviceId: context.deviceId,
+    });
+    if (renewal.kind !== 'current') {
+      log(`project credential ${renewal.kind}${renewal.reason ? `: ${renewal.reason}` : ''}`);
+    }
+    return { ...context, token: renewal.credential };
+  }
 
   const outcome = await ensureFreshToken(context.apiBaseUrl);
 

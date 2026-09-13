@@ -118,3 +118,38 @@ export function isLegacyNoticeDue(
   if (accessExpiresAt === undefined) return false;
   return Math.floor(nowMs / 1000) >= accessExpiresAt - noticeSeconds;
 }
+
+/**
+ * Thirty days. How far ahead of expiry a connected project's credential is
+ * renewed. Mirrors src/core/refresh-policy.ts; see "Project credentials" in
+ * docs/token-refresh.md.
+ */
+export const DEFAULT_PROJECT_RENEW_THRESHOLD_SECONDS = 30 * 24 * 60 * 60;
+export const PROJECT_RENEW_THRESHOLD_ENV = 'AGENTBOARD_PROJECT_RENEW_THRESHOLD_SECONDS';
+
+/** @param {NodeJS.ProcessEnv} [env] */
+export function configuredProjectRenewThresholdSeconds(env = process.env) {
+  const raw = env[PROJECT_RENEW_THRESHOLD_ENV];
+  // Same reading as the access threshold: empty means unset, not zero.
+  if (raw === undefined || raw.trim() === '') return DEFAULT_PROJECT_RENEW_THRESHOLD_SECONDS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_PROJECT_RENEW_THRESHOLD_SECONDS;
+  return Math.floor(parsed);
+}
+
+/**
+ * Whether a project credential is inside its renewal window, capped at a third
+ * of its lifetime. Unknown expiry means no renewal.
+ *
+ * @param {{iat?: unknown, exp?: unknown}|null|undefined} claims
+ * @param {number} [nowMs]
+ * @param {NodeJS.ProcessEnv} [env]
+ */
+export function isProjectRenewalDue(claims, nowMs = Date.now(), env = process.env) {
+  const exp = typeof claims?.exp === 'number' ? claims.exp : undefined;
+  const threshold = effectiveThresholdSeconds(
+    tokenTtlSeconds(claims ?? {}),
+    configuredProjectRenewThresholdSeconds(env),
+  );
+  return shouldRefresh(exp, threshold, nowMs);
+}

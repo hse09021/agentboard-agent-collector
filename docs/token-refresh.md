@@ -40,7 +40,8 @@ survive every write.
 **Scope.** Refresh applies to `.token` (the default route) only. Per-project
 credentials under `credentials/<ref>.cred` are separate enrollment credentials,
 are not part of a refresh family, and must never be sent to the refresh
-endpoint.
+endpoint. They are renewed by a different, simpler mechanism — see
+"Project credentials" below.
 
 ## Refresh timing
 
@@ -165,6 +166,73 @@ never happened.
 The record is rewritten only when its reason changes. Hooks run on every
 session end, and rewriting an identical record each time churns the file that
 concurrent hooks are reading.
+
+## Project credentials
+
+`agentboard connect` stores a device credential per connected directory in
+`credentials/<ref>.cred` (a bare JWT, mode `0600`). The organization server
+issues it for 90 days by default (`PROJECT_CREDENTIAL_TTL_SECONDS`). Until
+0.10.0 nothing renewed it, so every connection went dark 90 days after
+`connect`, with a 401 no hook reported.
+
+**Who renews.** Hooks only. They are the only code that uploads with these
+credentials, and renewing on upload means a machine that is actually used never
+expires, while one left unused for the whole lifetime does — no indefinite
+bearer. The CLI never calls the server for this; `status` and `doctor` only
+report.
+
+**When.** Before an upload, when `now >= exp - threshold`:
+
+```
+threshold = min(AGENTBOARD_PROJECT_RENEW_THRESHOLD_SECONDS (default 30 days), floor(ttl / 3))
+```
+
+`ttl = exp - iat` from the credential's own claims. The cap is the same guard as
+for access tokens: verifying renewal means shortening the server TTL, and an
+uncapped 30-day window would renew on every upload.
+
+- An already expired credential is **not** sent: the server only renews a
+  credential that is still valid, so the request could only fail. The CLI tells
+  the user to connect again.
+- No `exp` claim: do not renew.
+
+**Procedure.**
+
+1. `POST {api}/v1/collector/renew`, `Authorization: Bearer <credential>`,
+   body `{"device_id": "<binding device id>"}`.
+2. **2xx** — `{"credential": "<jwt>", ...}`. The new credential must decode and
+   carry a future `exp`, otherwise treat the reply as transient.
+3. **Compare before writing.** Re-read the `.cred` file. Write the new
+   credential (temp file + `rename`) only if the file still holds the exact
+   credential that was renewed:
+   - another hook renewed first → keep theirs; both are valid, and the server
+     does not burn families here, so no lock is needed;
+   - the file is gone → the connection was removed (`disconnect`) or replaced
+     mid-flight; recreating it would leave a live credential with no binding.
+4. **400 / 401 / 403 / 404** — refused (`revoked_device`, `not_a_member`,
+   `project_not_found`, `device_not_found`, `invalid_credential`, …). Keep the
+   current credential — it still works until it expires — and record the
+   refusal in `project-renewal.json` (below).
+5. **5xx / 429 / network / timeout** — transient. Keep the current credential
+   and try again on the next upload.
+
+A renewal problem **never blocks an upload.**
+
+**Surfacing failure.** `~/.agentboard/project-renewal.json`:
+
+```jsonc
+{
+  "v": 1,
+  "failures": {
+    "<credential ref>": { "at": "<iso>", "status": 403, "code": "revoked_device" }
+  }
+}
+```
+
+Rewritten only when a ref's status or code changes (the same churn rule as
+`auth-failure.json`), and the ref's entry is removed after a successful renewal.
+`status` and `doctor` show each connection's expiry and any refusal, and ignore
+entries whose ref no longer belongs to a connection.
 
 ## Login / logout
 

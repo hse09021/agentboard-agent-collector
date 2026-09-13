@@ -4,9 +4,12 @@ import * as os from "os";
 import { loadConfig, getConfigDir, getHookSentPath } from "../../core/config";
 import {
   hasToken,
+  loadCredential,
   loadToken,
   loadTokenBundle,
 } from "../../platform/credential-store";
+import { loadConfigV2 } from "../../core/bindings";
+import { reportProjectCredentials } from "../../core/project-credential-status";
 import {
   describeCredential,
   formatCredentialStatus,
@@ -150,6 +153,20 @@ export async function statusCommand(): Promise<void> {
   if (authFailure) {
     logger.warn(describeAuthFailure(authFailure));
     logger.plain(chalk.dim("Run `agentboard login` to reconnect."));
+    logger.plain("");
+  }
+
+  // ── Connected projects ───────────────────────────────────────────────────
+  // Hooks renew these credentials in the background. A refusal or an expiry is
+  // otherwise invisible: the organization dashboard just stops growing.
+  const connections = reportProjectCredentials(loadConfigV2().bindings, loadCredential);
+  if (connections.length > 0) {
+    logger.plain(chalk.bold("Connected projects"));
+    logger.plain("─".repeat(40));
+    for (const row of connections) {
+      const icon = row.ok ? chalk.green("✔") : chalk.yellow("!");
+      logger.plain(`  ${icon}  ${row.label}  ${row.ok ? chalk.dim(row.message) : chalk.yellow(row.message)}`);
+    }
     logger.plain("");
   }
 
