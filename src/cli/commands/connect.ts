@@ -15,6 +15,9 @@ import {
   saveConfigV2,
 } from "../../core/bindings";
 import { saveCredential, deleteCredential } from "../../platform/credential-store";
+import { retireBinding } from "../../core/retire-binding";
+import type { Binding } from "../../core/config-schema";
+import type { DisconnectNotice } from "../../api/project-device";
 
 function prompt(question: string): Promise<string> {
   return new Promise((resolve) => {
@@ -67,6 +70,24 @@ function validateTicket(claims: JwtClaims | null): { api: string; app: string } 
     api: api.replace(/\/+$/, ""),
     app: (app ?? parsed.origin).replace(/\/+$/, ""),
   };
+}
+
+/**
+ * Reports whether the old device was revoked on its server. When the notice did
+ * not land, the device is still listed as connected there, so say where to
+ * revoke it by hand rather than implying the server knows.
+ */
+function reportRetired(binding: Binding, notice: DisconnectNotice, what: string): void {
+  const server = binding.server.label ?? binding.server.app_base_url;
+  if (notice.ok) {
+    logger.plain(`  Revoked ${what} on ${server}.`);
+    return;
+  }
+  logger.warn(
+    `Could not tell ${server} to revoke ${what} (${notice.reason}). ` +
+      `It still shows as connected there — revoke it under Settings → Devices at ` +
+      `${binding.server.app_base_url}, or ask an organization admin.`
+  );
 }
 
 interface EnrollResponse {
@@ -196,9 +217,10 @@ export async function connectCommand(
   // rather than a binding pointing at a credential that does not exist.
   saveCredential(credentialRef, result.credential);
 
+  let replaced: Binding | undefined;
   try {
     const config = loadConfigV2();
-    const { config: next, replaced } = addBinding(config, {
+    const added = addBinding(config, {
       dir: absDir,
       server: {
         api_base_url: result.server?.api_base_url ?? validated.api,
@@ -209,9 +231,8 @@ export async function connectCommand(
       credentialRef,
       projectLabel: result.project?.display_name ?? ticketProject,
     });
-    saveConfigV2(next);
-
-    if (replaced) deleteCredential(replaced.credential_ref);
+    saveConfigV2(added.config);
+    replaced = added.replaced ?? undefined;
   } catch (err) {
     deleteCredential(credentialRef);
     logger.error(`Could not save the connection: ${(err as Error).message}`);
@@ -224,6 +245,14 @@ export async function connectCommand(
   );
   if (result.project?.display_name) {
     logger.plain(`  Project: ${result.project.display_name}`);
+  }
+
+  // The new connection is saved, so the one it replaced is gone locally. Tell
+  // its server now (it may be a different server). Doing this inside the save
+  // above would roll back a successful connect whenever the notice failed.
+  if (replaced) {
+    const notice = await retireBinding(replaced);
+    reportRetired(replaced, notice, "the previous device for this directory");
   }
   logger.plain("");
   logger.plain("Sessions run in this directory now go to that server.");
@@ -241,14 +270,16 @@ export async function disconnectCommand(dir: string): Promise<void> {
     return;
   }
 
+  // Local first: once this is saved, no hook routes to that server any more.
   saveConfigV2(next);
-  deleteCredential(removed.credential_ref);
 
   logger.success(
     `Disconnected ${chalk.cyan(absDir)} from ${
       removed.server.label ?? removed.server.app_base_url
     }`
   );
+  const notice = await retireBinding(removed);
+  reportRetired(removed, notice, "this device");
   logger.plain("");
   // Sessions are pinned to the route of their first successful upload, so an
   // in-flight session keeps going where it started rather than splitting its
