@@ -109,7 +109,7 @@ const LEGACY_STORED = { v: 1, access: "legacy-jwt", refresh: null };
 const ROTATABLE_STORED = { v: 1, access: "acc", refresh: "r1" };
 
 // ── 이슈 #6 ──────────────────────────────────────────────────────────────────
-// 업그레이드한 기존 사용자는 .token 에 레거시 JWT 가 있다는 이유로 조기 리턴에
+// 업그레이드한 기존 사용자는 .token에 레거시 JWT 가 있다는 이유로 조기 리턴에
 // 막혀, v=2 로그인 URL 을 볼 기회조차 없었다. 레거시는 회전할 수 없으므로
 // 스스로 새 형식으로 넘어갈 방법이 없다 — 만료까지 영영 레거시로 남는다.
 describe("loginCommand — 레거시 토큰에서 업그레이드", () => {

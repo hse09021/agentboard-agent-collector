@@ -89,7 +89,7 @@ agentboard login
 
 갱신 시점은 기본적으로 만료 5분 전입니다. `AGENTBOARD_REFRESH_THRESHOLD_SECONDS` 로 조정할 수
 있지만, 실제로 필요한 경우는 짧은 TTL 로 로테이션을 검증할 때뿐입니다. 이 값은 토큰 수명의 1/3 을
-넘지 않도록 자동으로 제한됩니다 — 그러지 않으면 매 요청마다 갱신이 일어나 rate limit 에 걸립니다.
+넘지 않도록 자동으로 제한됩니다 — 그러지 않으면 매 요청마다 갱신이 일어나 rate limit에 걸립니다.
 
 </details>
 

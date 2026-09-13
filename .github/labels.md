@@ -51,7 +51,7 @@ gh label create security      --color B60205 --description "보안 관련"      
 ## 대시보드 저장소와의 관계
 
 이 저장소는 수집기 CLI 전용입니다. 웹 대시보드·API 서버 이슈는
-[ai-cost-dashboard](https://github.com/hse09021/ai-cost-dashboard/issues) 에 올립니다.
+[ai-cost-dashboard](https://github.com/hse09021/ai-cost-dashboard/issues)에 올립니다.
 두 저장소는 같은 라벨 체계와 브랜치 규칙을 공유합니다.
 
 이벤트 형식처럼 양쪽이 함께 바뀌어야 하는 변경은 각 저장소에 이슈를 하나씩

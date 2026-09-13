@@ -145,10 +145,10 @@ jobs:
               sha: baseRef.data.object.sha,
             });
 
-            core.info(`${base}@${baseRef.data.object.sha.slice(0, 7)} 에서 ${branch} 생성`);
+            core.info(`${base}@${baseRef.data.object.sha.slice(0, 7)}에서 ${branch} 생성`);
 
             const body = [
-              `\`${base}\` 에서 [\`${branch}\`](${context.payload.repository.html_url}/tree/${encodeURIComponent(branch)}) 브랜치를 만들었습니다.`,
+              `\`${base}\`에서 [\`${branch}\`](${context.payload.repository.html_url}/tree/${encodeURIComponent(branch)}) 브랜치를 만들었습니다.`,
               '',
               '```bash',
               'git fetch origin',
