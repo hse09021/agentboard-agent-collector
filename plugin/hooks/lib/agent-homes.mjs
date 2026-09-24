@@ -294,7 +294,7 @@ function defaultHomeFor(kind) {
  * then the default. Deduped on the normalized form and filtered to what
  * actually exists.
  *
- * Order matters for callers that stop at the first hit (findCodexSessionFile):
+ * Order matters for callers that stop at the first hit (findCodexSessionFiles):
  * the env home is where the agent that spawned us is actually writing.
  *
  * @param {AgentHomeKind} kind

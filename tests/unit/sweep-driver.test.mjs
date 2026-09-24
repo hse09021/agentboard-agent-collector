@@ -371,6 +371,64 @@ describe('duplicate homes', () => {
   });
 });
 
+// Codex can move a live thread onto a new rollout, `<thread>_<page>.jsonl`,
+// whose session_meta still names the thread. The ledger keeps one figure per
+// thread, so a later page diffed on its own against it lost the earlier pages.
+describe('rollout pages', () => {
+  const sid = 'abababab-0000-0000-0000-000000000009';
+  const page = 'abababac-0000-0000-0000-000000000000';
+
+  /** A later page next to the thread's first one, written now. */
+  function writePage(firstPage, tokens) {
+    const file = firstPage
+      .replace(`-${sid}.jsonl`, `-${sid}_${page}.jsonl`)
+      .replace('T00-00-00', 'T01-00-00');
+    const lines = codexLines(sid, '/work/proj', { tokens });
+    writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    return file;
+  }
+
+  it('uploads a later page on top of what the first page already sent', async () => {
+    await bootstrap();
+    const firstPage = writeCodexSession(join(homeDir, '.codex'), sid, '/work/proj', {
+      ageMs: 60_000,
+      tokens: 400,
+    });
+    const first = [];
+    await sweep.runSweep({ uploader: recordingUploader(first) });
+    expect(first.flatMap((u) => u.events).reduce((n, e) => n + e.total_tokens, 0)).toBe(500);
+
+    writePage(firstPage, 900);
+    const second = [];
+    await sweep.runSweep({ uploader: recordingUploader(second) });
+
+    const events = second.flatMap((u) => u.events);
+    // Before the fix: 1000 - 500 = 500, the first page's 500 lost.
+    expect(events.reduce((n, e) => n + e.total_tokens, 0)).toBe(1000);
+    expect(events.every((e) => e.session_id === sid)).toBe(true);
+    expect(config.getSentTotals('codex', sid).totalTokens).toBe(1500);
+  });
+
+  it('counts a thread once, with every page, when the sweep meets all of them', async () => {
+    await bootstrap();
+    const firstPage = writeCodexSession(join(homeDir, '.codex'), sid, '/work/proj', {
+      ageMs: 60_000,
+      tokens: 400,
+    });
+    writePage(firstPage, 100);
+
+    const sent = [];
+    const report = await sweep.runSweep({ uploader: recordingUploader(sent) });
+
+    expect(report.uploaded).toBe(1);
+    expect(sent.flatMap((u) => u.events).reduce((n, e) => n + e.total_tokens, 0)).toBe(500 + 200);
+
+    const again = [];
+    await sweep.runSweep({ uploader: recordingUploader(again) });
+    expect(again).toHaveLength(0);
+  });
+});
+
 describe('concurrency and failure', () => {
   it('skips a session another hook is already uploading', async () => {
     await bootstrap();
