@@ -9,15 +9,16 @@ import { generateDeviceId } from "../../core/device-id";
 import { detectOS } from "../../platform/os";
 import {
   addBinding,
+  findDeviceIdForServer,
   generateCredentialRef,
   loadConfigV2,
   removeBinding,
   saveConfigV2,
 } from "../../core/bindings";
 import { saveCredential, deleteCredential } from "../../platform/credential-store";
-import { retireBinding } from "../../core/retire-binding";
-import type { Binding } from "../../core/config-schema";
-import type { DisconnectNotice } from "../../api/project-device";
+import { retireBinding, type RetireOutcome } from "../../core/retire-binding";
+import type { Binding, CollectorConfigV2 } from "../../core/config-schema";
+import { ApiError, extractErrorCode } from "../../api/client";
 
 function prompt(question: string): Promise<string> {
   return new Promise((resolve) => {
@@ -77,8 +78,15 @@ function validateTicket(claims: JwtClaims | null): { api: string; app: string } 
  * not land, the device is still listed as connected there, so say where to
  * revoke it by hand rather than implying the server knows.
  */
-function reportRetired(binding: Binding, notice: DisconnectNotice, what: string): void {
+function reportRetired(binding: Binding, notice: RetireOutcome, what: string): void {
   const server = binding.server.label ?? binding.server.app_base_url;
+  if ("kept" in notice) {
+    const n = notice.sharedWith;
+    logger.plain(
+      `  Kept this machine's device on ${server}: ${n} connection${n === 1 ? "" : "s"} here still use${n === 1 ? "s" : ""} it.`
+    );
+    return;
+  }
   if (notice.ok) {
     logger.plain(`  Revoked ${what} on ${server}.`);
     return;
@@ -90,7 +98,7 @@ function reportRetired(binding: Binding, notice: DisconnectNotice, what: string)
   );
 }
 
-interface EnrollResponse {
+export interface EnrollResponse {
   credential: string;
   device_id?: string;
   server?: { api_base_url?: string; app_base_url?: string; label?: string };
@@ -119,12 +127,53 @@ async function enroll(
 
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(
-      `server rejected the enrollment (HTTP ${response.status}) ${body.slice(0, 200)}`
-    );
+    throw new ApiError(response.status, body, extractErrorCode(body));
   }
 
   return (await response.json()) as EnrollResponse;
+}
+
+export interface Enrollment {
+  result: EnrollResponse;
+  deviceId: string;
+  /** Set when the id this machine used on the server had been revoked there. */
+  revokedDeviceId?: string;
+}
+
+/**
+ * Enrolls under the device id this machine already uses on the ticket's server,
+ * so every directory connected to one server is one device there. Only a
+ * server this machine has no connection to gets a fresh id — ids still differ
+ * across servers, so two server operators cannot correlate the machine.
+ *
+ * A reused id may have been revoked (by an admin, or by an older collector's
+ * disconnect), and the server refuses a revoked id for good. As in `login`, a
+ * person has just presented a fresh ticket, which is what entitles us to come
+ * back as a new device — once.
+ */
+export async function enrollDevice(
+  apiBaseUrl: string,
+  ticket: string,
+  config: CollectorConfigV2,
+  enrollImpl: typeof enroll = enroll
+): Promise<Enrollment> {
+  const existing = findDeviceIdForServer(config, apiBaseUrl);
+  if (!existing) {
+    const deviceId = generateDeviceId();
+    return { result: await enrollImpl(apiBaseUrl, ticket, deviceId), deviceId };
+  }
+
+  try {
+    return { result: await enrollImpl(apiBaseUrl, ticket, existing), deviceId: existing };
+  } catch (err) {
+    if (!(err instanceof ApiError) || err.code !== "revoked_device") throw err;
+    const deviceId = generateDeviceId();
+    return {
+      result: await enrollImpl(apiBaseUrl, ticket, deviceId),
+      deviceId,
+      revokedDeviceId: existing,
+    };
+  }
 }
 
 export async function connectCommand(
@@ -191,19 +240,20 @@ export async function connectCommand(
     }
   }
 
-  // A fresh device id per server. Reusing one across servers would let two
-  // server operators correlate the same machine at no cost to them.
-  const deviceId = generateDeviceId();
-
-  let result: EnrollResponse;
+  let enrollment: Enrollment;
   try {
-    result = await enroll(validated.api, ticket, deviceId);
+    enrollment = await enrollDevice(validated.api, ticket, loadConfigV2());
   } catch (err) {
     // Nothing has been written yet. A ticket the server does not accept proves
     // neither the server nor the project, so no binding is created.
-    logger.error(`Could not connect: ${(err as Error).message}`);
+    const reason =
+      err instanceof ApiError
+        ? `server rejected the enrollment (HTTP ${err.status}) ${err.body.slice(0, 200)}`
+        : (err as Error).message;
+    logger.error(`Could not connect: ${reason}`);
     process.exit(1);
   }
+  const { result, deviceId, revokedDeviceId } = enrollment;
 
   if (!result || !result.credential) {
     logger.error("The server did not return a credential. Nothing was changed.");
@@ -218,6 +268,7 @@ export async function connectCommand(
   saveCredential(credentialRef, result.credential);
 
   let replaced: Binding | undefined;
+  let remaining: Binding[] = [];
   try {
     const config = loadConfigV2();
     const added = addBinding(config, {
@@ -233,6 +284,7 @@ export async function connectCommand(
     });
     saveConfigV2(added.config);
     replaced = added.replaced ?? undefined;
+    remaining = added.config.bindings;
   } catch (err) {
     deleteCredential(credentialRef);
     logger.error(`Could not save the connection: ${(err as Error).message}`);
@@ -250,14 +302,33 @@ export async function connectCommand(
   // The new connection is saved, so the one it replaced is gone locally. Tell
   // its server now (it may be a different server). Doing this inside the save
   // above would roll back a successful connect whenever the notice failed.
+  if (revokedDeviceId) warnRevokedSiblings(revokedDeviceId, remaining);
+
   if (replaced) {
-    const notice = await retireBinding(replaced);
+    const notice = await retireBinding(replaced, remaining);
     reportRetired(replaced, notice, "the previous device for this directory");
   }
   logger.plain("");
   logger.plain("Sessions run in this directory now go to that server.");
   logger.plain("Everything else keeps going to the community server.");
   logger.plain("");
+}
+
+/**
+ * Other directories connected to the same server still hold the revoked id, so
+ * their uploads are being refused. Their credentials are bound to that id on
+ * the server, so swapping in the new id locally would not help — each needs a
+ * `connect` of its own.
+ */
+function warnRevokedSiblings(revokedId: string, bindings: Binding[]): void {
+  const stale = bindings.filter((b) => b.server.device_id === revokedId);
+  logger.warn("This device had been disconnected on that server. Connected as a new device.");
+  if (stale.length === 0) return;
+  logger.plain(
+    `  ${stale.length} other director${stale.length === 1 ? "y" : "ies"} connected there still use the old device and cannot upload:`
+  );
+  for (const b of stale) logger.plain(`    ${b.abs_dir}`);
+  logger.plain("  Run `agentboard connect` in each to reconnect them.");
 }
 
 export async function disconnectCommand(dir: string): Promise<void> {
@@ -278,7 +349,7 @@ export async function disconnectCommand(dir: string): Promise<void> {
       removed.server.label ?? removed.server.app_base_url
     }`
   );
-  const notice = await retireBinding(removed);
+  const notice = await retireBinding(removed, next.bindings);
   reportRetired(removed, notice, "this device");
   logger.plain("");
   // Sessions are pinned to the route of their first successful upload, so an

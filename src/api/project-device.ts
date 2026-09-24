@@ -1,11 +1,13 @@
 /**
  * Telling an organization server that this machine has left a project.
  *
- * Every `agentboard connect` mints a fresh device id per server, so that two
- * server operators cannot correlate the same machine. The price is that the
- * server cannot tell "the same machine reconnected" from "a second machine".
- * It must not revoke old devices on its own, or it would cut off a colleague's
- * second laptop. Only this machine knows the connection is gone, so it says so.
+ * A machine has one device id per server, shared by every directory connected
+ * to it, and a different one on each server so that two server operators
+ * cannot correlate the same machine. The server still cannot tell "this
+ * machine left" from "a second machine joined", so it must not revoke old
+ * devices on its own, or it would cut off a colleague's second laptop. Only
+ * this machine knows the connection is gone, so it says so — once its last
+ * directory on that server is disconnected (see core/retire-binding).
  *
  * Best-effort by design. Disconnecting is the user's decision and must never
  * be blocked by a network problem or a server that predates this endpoint; the
