@@ -111,6 +111,21 @@ describe('discoverCodexSessionFiles', () => {
     const found = sweep.discoverCodexSessionFiles();
     expect(found).toHaveLength(1);
     expect(found[0].sessionIdHint).toBe('019fb322-9136-71c3-b651-5467b4aef078');
+    expect(found[0].sessionsDir).toBe(sessions);
+  });
+
+  it('names a later rollout page after its thread, not its page id', () => {
+    const sessions = join(homeDir, '.codex', 'sessions');
+    const dir = dateDir(sessions, 0);
+    mkdirSync(dir, { recursive: true });
+    touch(
+      join(
+        dir,
+        'rollout-2026-09-10T13-00-00-019fb322-9136-71c3-b651-5467b4aef078_019fb323-0000-7000-8000-000000000000.jsonl'
+      )
+    );
+
+    expect(sweep.discoverCodexSessionFiles()[0].sessionIdHint).toBe('019fb322-9136-71c3-b651-5467b4aef078');
   });
 
   it('prunes date directories outside the horizon', () => {

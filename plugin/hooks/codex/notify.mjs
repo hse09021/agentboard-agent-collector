@@ -14,7 +14,7 @@
  * short delay before giving up.
  */
 
-import { parseCodexFile, findCodexSessionFile } from './parse-codex.mjs';
+import { parseCodexFiles, findCodexSessionFiles } from './parse-codex.mjs';
 import { recordAgentHomesFromEnv } from '../lib/agent-homes.mjs';
 import { isRevokedDeviceError, revokedDeviceMessage } from '../lib/revoked.mjs';
 import { isSweepEnabled, maybeSpawnSweep } from '../lib/sweep.mjs';
@@ -139,11 +139,14 @@ async function main() {
   }).catch(() => null);
 
   // The retry loop exists because codex may not have flushed the turn's tokens
-  // yet — only the file's CONTENTS change across attempts, not which file it is.
-  // So resolve the path once and re-read it, rather than re-walking the tree:
-  // `findCodexSessionFile` (walk-by-name, across every Codex home) is retried
-  // only until the id-matched file exists — a brand-new rollout can appear a
-  // beat late — and then cached.
+  // yet — only the files' CONTENTS change across attempts, not which files they
+  // are. So resolve the paths once and re-read them, rather than re-walking the
+  // tree: `findCodexSessionFiles` (walk-by-name, across every Codex home) is
+  // retried only until an id-matched file exists — a brand-new rollout can
+  // appear a beat late — and then cached. It returns every page of the thread:
+  // once Codex moves a thread onto a new page, this turn's tokens are there and
+  // not in the first file. A page that appears only after the list was cached
+  // is not lost; the delta is cumulative, so the next turn picks it up.
   //
   // There is deliberately no "newest file anywhere" fallback. It existed for
   // Codex builds whose notify thread-id does not map to the rollout filename,
@@ -152,11 +155,11 @@ async function main() {
   // was diffed against this file and the result routed to that thread's server.
   // A session we cannot identify is now simply left alone — the cross-agent
   // sweep collects it later, with its own id, its own cwd and its own route.
-  let sessionFile = null; // id-matched file, once found
+  let sessionFiles = []; // the thread's pages, once found
   let parsed = null;
   for (let attempt = 0; attempt < RETRY_MAX; attempt++) {
-    if (!sessionFile) sessionFile = findCodexSessionFile(sessionId);
-    parsed = sessionFile ? parseCodexFile(sessionFile) : null;
+    if (sessionFiles.length === 0) sessionFiles = findCodexSessionFiles(sessionId);
+    parsed = sessionFiles.length > 0 ? parseCodexFiles(sessionFiles) : null;
     if (parsed && parsed.totalTokens > 0) break;
     if (attempt < RETRY_MAX - 1) await sleep(RETRY_DELAY_MS);
   }

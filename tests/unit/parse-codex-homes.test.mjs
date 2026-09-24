@@ -6,7 +6,9 @@
  * homedir() finds nothing. It also pins the removal of the "newest rollout
  * anywhere" fallback, which used to hand the caller an unrelated session whose
  * tokens were then diffed against another thread's ledger entry and routed to
- * that thread's server.
+ * that thread's server. And it pins that a thread Codex moved onto a new rollout
+ * page is read as a whole: the ledger keeps one figure per thread, so reading
+ * only the first page left every later turn uncollected.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -17,25 +19,30 @@ import { tmpdir } from 'node:os';
 let homeDir;
 let parseCodex;
 
-function writeRollout(home, sessionId, { tokens = 100 } = {}) {
-  const dir = join(home, 'sessions', '2026', '09', '10');
+function writeRollout(
+  home,
+  sessionId,
+  { tokens = 100, page, metaId = sessionId, day = '10', stamp = '2026-09-10T10-00-00' } = {}
+) {
+  const dir = join(home, 'sessions', '2026', '09', day);
   mkdirSync(dir, { recursive: true });
   const lines = [
     {
       type: 'session_meta',
-      timestamp: '2026-09-10T10:00:00.000Z',
-      payload: { id: sessionId, cwd: '/work/proj', model: 'gpt-5.5' },
+      timestamp: `2026-09-${day}T10:00:00.000Z`,
+      payload: { id: metaId, cwd: '/work/proj', model: 'gpt-5.5' },
     },
     {
       type: 'event_msg',
-      timestamp: '2026-09-10T10:01:00.000Z',
+      timestamp: `2026-09-${day}T10:01:00.000Z`,
       payload: {
         type: 'token_count',
         info: { last_token_usage: { input_tokens: tokens, output_tokens: 10, cached_input_tokens: 0 } },
       },
     },
   ];
-  const file = join(dir, `rollout-2026-09-10T10-00-00-${sessionId}.jsonl`);
+  const name = page ? `${sessionId}_${page}` : sessionId;
+  const file = join(dir, `rollout-${stamp}-${name}.jsonl`);
   writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
   return file;
 }
@@ -61,11 +68,11 @@ afterEach(() => {
   rmSync(homeDir, { recursive: true, force: true });
 });
 
-describe('findCodexSessionFile', () => {
+describe('findCodexSessionFiles', () => {
   it('finds a rollout in the default home', async () => {
     const sid = '11111111-1111-1111-1111-111111111111';
     writeRollout(join(homeDir, '.codex'), sid);
-    expect(parseCodex.findCodexSessionFile(sid)).toContain(sid);
+    expect(parseCodex.findCodexSessionFiles(sid)).toEqual([expect.stringContaining(sid)]);
   });
 
   it('finds a rollout in the home CODEX_HOME points at', async () => {
@@ -78,7 +85,7 @@ describe('findCodexSessionFile', () => {
 
     // Before the fix this returned null, and the caller fell back to an
     // unrelated session in ~/.codex.
-    expect(parseCodex.findCodexSessionFile(sid)).toContain('orca-codex-home');
+    expect(parseCodex.findCodexSessionFiles(sid)).toEqual([expect.stringContaining('orca-codex-home')]);
   });
 
   it('still searches the default home when CODEX_HOME is set', async () => {
@@ -91,13 +98,47 @@ describe('findCodexSessionFile', () => {
     vi.stubEnv('CODEX_HOME', orcaHome);
     await reimport();
 
-    expect(parseCodex.findCodexSessionFile(orcaSid)).toContain('orca-codex-home');
-    expect(parseCodex.findCodexSessionFile(defaultSid)).toContain('.codex');
+    expect(parseCodex.findCodexSessionFiles(orcaSid)).toEqual([expect.stringContaining('orca-codex-home')]);
+    expect(parseCodex.findCodexSessionFiles(defaultSid)).toEqual([expect.stringContaining('.codex')]);
   });
 
-  it('returns null rather than guessing when the id is unknown', () => {
+  it('returns nothing rather than guessing when the id is unknown', () => {
     writeRollout(join(homeDir, '.codex'), '55555555-5555-5555-5555-555555555555');
-    expect(parseCodex.findCodexSessionFile('99999999-9999-9999-9999-999999999999')).toBeNull();
+    expect(parseCodex.findCodexSessionFiles('99999999-9999-9999-9999-999999999999')).toEqual([]);
+  });
+
+  it('finds every page of a thread, oldest first, even across date directories', () => {
+    const sid = '77777777-7777-7777-7777-777777777777';
+    const page = '77777778-0000-0000-0000-000000000000';
+    const home = join(homeDir, '.codex');
+    const later = writeRollout(home, sid, { page, day: '11', stamp: '2026-09-11T09-00-00' });
+    const first = writeRollout(home, sid);
+
+    expect(parseCodex.findCodexSessionFiles(sid)).toEqual([first, later]);
+  });
+
+  it('never treats a page id as a thread of its own', () => {
+    const sid = '88888888-8888-8888-8888-888888888888';
+    const page = '88888889-0000-0000-0000-000000000000';
+    writeRollout(join(homeDir, '.codex'), sid, { page });
+
+    expect(parseCodex.findCodexSessionFiles(page)).toEqual([]);
+  });
+
+  it('takes every page from one home, never mixing in a backfilled copy', async () => {
+    const sid = '99999999-0000-0000-0000-000000000001';
+    const page = '99999999-0000-0000-0000-000000000002';
+    const orcaHome = join(homeDir, 'orca-codex-home');
+    writeRollout(orcaHome, sid);
+    writeRollout(orcaHome, sid, { page, stamp: '2026-09-10T11-00-00' });
+    writeRollout(join(homeDir, '.codex'), sid);
+
+    vi.stubEnv('CODEX_HOME', orcaHome);
+    await reimport();
+
+    const found = parseCodex.findCodexSessionFiles(sid);
+    expect(found).toHaveLength(2);
+    expect(found.every((f) => f.includes('orca-codex-home'))).toBe(true);
   });
 });
 
@@ -120,5 +161,31 @@ describe('parseCodexSession', () => {
     const parsed = parseCodex.parseCodexSession(sid);
     expect(parsed).toMatchObject({ sessionId: sid, cwd: '/work/proj', model: 'gpt-5.5' });
     expect(parsed.totalTokens).toBe(510);
+  });
+
+  it('adds up a thread across its pages, per day', () => {
+    const sid = 'aaaaaaaa-7777-7777-7777-777777777777';
+    const page = 'aaaaaaab-0000-0000-0000-000000000000';
+    const home = join(homeDir, '.codex');
+    writeRollout(home, sid, { tokens: 500 });
+    writeRollout(home, sid, { tokens: 200, page, day: '11', stamp: '2026-09-11T09-00-00' });
+
+    const parsed = parseCodex.parseCodexSession(sid);
+    expect(parsed.sessionId).toBe(sid);
+    expect(parsed.totalTokens).toBe(510 + 210);
+    expect(parsed.byDate.map((d) => [d.date, d.totalTokens])).toEqual([
+      ['2026-09-10', 510],
+      ['2026-09-11', 210],
+    ]);
+  });
+
+  it('leaves out a file named like a page whose session_meta names another thread', () => {
+    const sid = 'bbbbbbbb-7777-7777-7777-777777777777';
+    const other = 'bbbbbbbc-0000-0000-0000-000000000000';
+    const home = join(homeDir, '.codex');
+    writeRollout(home, sid, { tokens: 500 });
+    writeRollout(home, sid, { tokens: 900, page: other, metaId: other, stamp: '2026-09-10T11-00-00' });
+
+    expect(parseCodex.parseCodexSession(sid).totalTokens).toBe(510);
   });
 });

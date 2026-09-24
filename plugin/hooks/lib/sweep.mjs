@@ -63,7 +63,7 @@ import { uploadEvents } from './transport.mjs';
 import { resolveUploadContextWithRefresh } from './upload-context.mjs';
 import { assertNoForbiddenFields } from './forbidden-data-guard.mjs';
 import { parseClaudeSession, convertLineCountedWatermark } from '../claude/parse-claude.mjs';
-import { parseCodexFile } from '../codex/parse-codex.mjs';
+import { findCodexSessionFiles, parseCodexFiles } from '../codex/parse-codex.mjs';
 
 export const SWEEP_STATE_PATH = join(CONFIG_DIR, 'sweep-state.json');
 
@@ -281,6 +281,9 @@ export function discoverCodexSessionFiles(opts = {}) {
           source: 'codex',
           filePath: full,
           sessionIdHint: rolloutSessionId(entry.name),
+          // Where this thread's other pages are looked up — never another home,
+          // which may hold a backfilled copy of the same thread.
+          sessionsDir,
           mtimeMs: stat.mtimeMs,
           size: stat.size,
         });
@@ -291,12 +294,16 @@ export function discoverCodexSessionFiles(opts = {}) {
   return sortByMtimeDesc(out);
 }
 
-/** rollout-2026-07-30T22-06-55-<uuid>.jsonl -> <uuid> */
+const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+
+/**
+ * rollout-2026-07-30T22-06-55-<uuid>.jsonl -> <uuid>
+ * rollout-2026-07-30T23-10-00-<uuid>_<page>.jsonl -> <uuid>, the thread, so
+ * every page of a thread is one session to the sweep.
+ */
 function rolloutSessionId(fileName) {
   const stem = basename(fileName, '.jsonl');
-  const match = stem.match(
-    /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
-  );
+  const match = stem.match(new RegExp(`(${UUID})(?:_${UUID})?$`, 'i'));
   return match ? match[1] : stem;
 }
 
@@ -346,7 +353,13 @@ function parseCandidate(candidate) {
     const parsed = parseClaudeSession(candidate.filePath);
     return parsed ? { ...parsed, sessionId: candidate.sessionIdHint } : null;
   }
-  const parsed = parseCodexFile(candidate.filePath);
+  // The ledger holds one cumulative per thread, so the whole thread is parsed
+  // whichever of its pages was discovered. Diffing a single page against it is
+  // what lost a thread's earlier pages once Codex moved it onto a new one.
+  const pages = candidate.sessionsDir
+    ? findCodexSessionFiles(candidate.sessionIdHint, { dirs: [candidate.sessionsDir] })
+    : [];
+  const parsed = parseCodexFiles(pages.length > 0 ? pages : [candidate.filePath]);
   if (!parsed) return null;
   return { ...parsed, sessionId: parsed.sessionId || candidate.sessionIdHint };
 }
