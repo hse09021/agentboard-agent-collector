@@ -12,6 +12,8 @@
  *   - Codex: the rollout's own running counter (`total_token_usage`) on its
  *     last token_count event, minus what the file started with — a paginated
  *     continuation file inherits its thread's counter from the earlier page.
+ *     Per thread, the pages' figures summed, grouped by each file's own
+ *     session_meta id, since the upload ledger keeps one figure per thread.
  *
  * Opt-in, because it reads this machine's transcripts and CI has none:
  *
@@ -25,7 +27,12 @@ import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseClaudeSession } from '../../plugin/hooks/claude/parse-claude.mjs';
-import { parseCodexFile } from '../../plugin/hooks/codex/parse-codex.mjs';
+import {
+  findCodexSessionFiles,
+  parseCodexFile,
+  parseCodexFiles,
+  parseCodexSession,
+} from '../../plugin/hooks/codex/parse-codex.mjs';
 import {
   discoverClaudeTranscriptFiles,
   discoverCodexSessionFiles,
@@ -118,6 +125,14 @@ function codexReference(filePath) {
   return { totalTokens: billed(last.total_token_usage) - inherited };
 }
 
+/** The thread a rollout belongs to, as its own session_meta states it. */
+function codexThreadId(filePath) {
+  for (const entry of jsonlEntries(filePath)) {
+    if (entry.type === 'session_meta' && entry.payload?.id) return String(entry.payload.id);
+  }
+  return null;
+}
+
 function summarize(rows, fields) {
   const mismatched = rows.filter((r) => fields.some((f) => r.collector[f] !== r.reference[f]));
   const sum = (side) => rows.reduce((n, r) => n + r[side].totalTokens, 0);
@@ -182,6 +197,50 @@ describe.skipIf(!ENABLED)('token accuracy against this machine’s real transcri
 
     const summary = summarize(rows, ['totalTokens']);
     console.log('[accuracy] codex', JSON.stringify(summary, null, 2));
+    expect(summary.mismatched, JSON.stringify(summary, null, 2)).toBe(0);
+  });
+
+  // The ledger holds one figure per thread, so matching each file is not
+  // enough: a thread Codex moved onto a new page must add up across its pages.
+  // The reference groups files by what Codex itself wrote into each file's
+  // session_meta; the collector finds a thread's pages by file name, both the
+  // way notify does (every home) and the way the sweep does (the candidate's
+  // own home).
+  it('Codex: each thread’s usage adds up across its rollout pages', () => {
+    const threads = new Map();
+    for (const candidate of discoverCodexSessionFiles(EVERYTHING)) {
+      const threadId = codexThreadId(candidate.filePath) ?? candidate.sessionIdHint;
+      const thread = threads.get(threadId) ?? { sessionsDir: candidate.sessionsDir, files: [] };
+      thread.files.push(candidate.filePath);
+      threads.set(threadId, thread);
+    }
+
+    const rows = [];
+    for (const [threadId, { sessionsDir, files }] of threads) {
+      const before = lastModified(files);
+      const reference = {
+        totalTokens: files.reduce((n, f) => n + codexReference(f).totalTokens, 0),
+      };
+      const viaNotify = parseCodexSession(threadId)?.totalTokens ?? 0;
+      const viaSweep =
+        parseCodexFiles(findCodexSessionFiles(threadId, { dirs: [sessionsDir] }))?.totalTokens ?? 0;
+      if (lastModified(files) !== before) continue;
+
+      if (viaNotify === 0 && viaSweep === 0 && reference.totalTokens === 0) continue;
+      // Either path disagreeing counts as a mismatch; report the worse one.
+      const worse =
+        Math.abs(viaNotify - reference.totalTokens) >= Math.abs(viaSweep - reference.totalTokens)
+          ? viaNotify
+          : viaSweep;
+      rows.push({
+        session: `${threadId} (${files.length} page${files.length > 1 ? 's' : ''})`,
+        collector: { totalTokens: worse },
+        reference,
+      });
+    }
+
+    const summary = summarize(rows, ['totalTokens']);
+    console.log('[accuracy] codex threads', JSON.stringify(summary, null, 2));
     expect(summary.mismatched, JSON.stringify(summary, null, 2)).toBe(0);
   });
 });
