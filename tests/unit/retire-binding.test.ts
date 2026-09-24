@@ -8,7 +8,8 @@
  *   never block or undo a local disconnect;
  * - local state is saved BEFORE the server is told, otherwise a failed config
  *   write leaves hooks uploading with a credential the server just revoked;
- * - the local credential is deleted whether or not the notice landed.
+ * - the local credential is deleted whether or not the notice landed;
+ * - a device still used by another directory on the same server is kept.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -99,7 +100,7 @@ describe("retireBinding", () => {
       }),
     };
 
-    const notice = await retireBinding(binding, deps);
+    const notice = await retireBinding(binding, [], deps);
 
     expect(notice).toEqual({ ok: true, revoked: 1 });
     expect(deps.notify).toHaveBeenCalledWith(API, CREDENTIAL, DEVICE);
@@ -114,7 +115,7 @@ describe("retireBinding", () => {
       notify: vi.fn().mockResolvedValue({ ok: false, reason: "HTTP 503" }),
     };
 
-    const notice = await retireBinding(binding, deps);
+    const notice = await retireBinding(binding, [], deps);
 
     expect(notice).toEqual({ ok: false, reason: "HTTP 503" });
     expect(deps.deleteCredential).toHaveBeenCalledWith(binding.credential_ref);
@@ -125,14 +126,41 @@ describe("retireBinding", () => {
     const noCredential = { loadCredential: vi.fn().mockReturnValue(null), deleteCredential: vi.fn(), notify: vi.fn() };
     const noDevice = { loadCredential: vi.fn().mockReturnValue(CREDENTIAL), deleteCredential: vi.fn(), notify: vi.fn() };
 
-    expect((await retireBinding(binding, noCredential)).ok).toBe(false);
+    expect((await retireBinding(binding, [], noCredential)).ok).toBe(false);
     expect(
-      (await retireBinding({ ...binding, server: { ...binding.server, device_id: undefined } }, noDevice)).ok
+      (await retireBinding({ ...binding, server: { ...binding.server, device_id: undefined } }, [], noDevice)).ok
     ).toBe(false);
 
     expect(noCredential.notify).not.toHaveBeenCalled();
     expect(noDevice.notify).not.toHaveBeenCalled();
     expect(noCredential.deleteCredential).toHaveBeenCalled();
+  });
+
+  it("keeps the device when another connection to the same server still uses it", async () => {
+    const { retireBinding } = await import("../../src/core/retire-binding");
+    const sibling = { ...binding, abs_dir: "/work/web", real_dir: "/work/web", credential_ref: "fedcba9876543210" };
+    const deps = { loadCredential: vi.fn().mockReturnValue(CREDENTIAL), deleteCredential: vi.fn(), notify: vi.fn() };
+
+    const notice = await retireBinding(binding, [sibling], deps);
+
+    // ★ Revoking here would cut /work/web off its server too.
+    expect(notice).toEqual({ ok: true, kept: "shared", sharedWith: 1 });
+    expect(deps.notify).not.toHaveBeenCalled();
+    expect(deps.deleteCredential).toHaveBeenCalledWith(binding.credential_ref);
+  });
+
+  it("still revokes when the remaining connections use other devices or servers", async () => {
+    const { retireBinding } = await import("../../src/core/retire-binding");
+    const otherDevice = { ...binding, credential_ref: "1", server: { ...binding.server, device_id: "dev_other" } };
+    const otherServer = { ...binding, credential_ref: "2", server: { ...binding.server, api_base_url: "https://other.example/api" } };
+    const deps = {
+      loadCredential: vi.fn().mockReturnValue(CREDENTIAL),
+      deleteCredential: vi.fn(),
+      notify: vi.fn().mockResolvedValue({ ok: true, revoked: 1 }),
+    };
+
+    expect(await retireBinding(binding, [otherDevice, otherServer], deps)).toEqual({ ok: true, revoked: 1 });
+    expect(deps.notify).toHaveBeenCalledWith(API, CREDENTIAL, DEVICE);
   });
 
   it("never throws, even if loading the credential does", async () => {
@@ -144,7 +172,7 @@ describe("retireBinding", () => {
       deleteCredential: vi.fn(),
       notify: vi.fn(),
     };
-    await expect(retireBinding(binding, deps)).resolves.toEqual({ ok: false, reason: "EACCES" });
+    await expect(retireBinding(binding, [], deps)).resolves.toEqual({ ok: false, reason: "EACCES" });
   });
 });
 
@@ -188,6 +216,35 @@ describe("disconnectCommand", () => {
     expect(init.headers.Authorization).toBe(`Bearer ${CREDENTIAL}`);
     expect(bindingsAtNotice).toEqual([]);
     expect(store.loadCredential(ref)).toBeNull();
+  });
+
+  it("revokes the device only when the last directory on that server disconnects", async () => {
+    const { ref, bindings, store } = await connectFixture();
+    const secondDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentboard-project-"));
+    const secondRef = bindings.generateCredentialRef();
+    store.saveCredential(secondRef, CREDENTIAL);
+    bindings.saveConfigV2(
+      bindings.addBinding(bindings.loadConfigV2(), {
+        dir: secondDir,
+        server: { api_base_url: API, app_base_url: APP, label: "Acme", device_id: DEVICE },
+        credentialRef: secondRef,
+      }).config
+    );
+    vi.stubGlobal("fetch", vi.fn(async () => okResponse({ revoked: 1 })));
+    const { disconnectCommand } = await import("../../src/cli/commands/connect");
+
+    try {
+      await disconnectCommand(projectDir);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(store.loadCredential(ref)).toBeNull();
+      expect(store.loadCredential(secondRef)).toBe(CREDENTIAL);
+
+      await disconnectCommand(secondDir);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(bindings.loadConfigV2().bindings).toEqual([]);
+    } finally {
+      fs.rmSync(secondDir, { recursive: true, force: true });
+    }
   });
 
   it("still disconnects locally when the server cannot be reached", async () => {

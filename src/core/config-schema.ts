@@ -13,7 +13,8 @@
  *      delta ledger and session lock keys did not need a server dimension.
  *   2. Every server carries its own `device_id`. Reusing one id across servers
  *      would let two server operators correlate the same machine at zero cost
- *      to them; per-server ids remove that for free.
+ *      to them; per-server ids remove that for free. Within one server the id
+ *      is shared by all its bindings, so the machine is one device there.
  *
  * Migration is a pure function so the hook runtime and the CLI can promote a v1
  * config independently and land on the same result. Only the CLI ever writes.

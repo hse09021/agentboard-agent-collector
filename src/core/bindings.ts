@@ -10,7 +10,13 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import type { Binding, CollectorConfigV2, ServerRef } from "./config-schema";
-import { CONFIG_VERSION, migrateV1toV2, normalizeV2 } from "./config-schema";
+import {
+  CONFIG_VERSION,
+  migrateLegacyHost,
+  migrateV1toV2,
+  normalizeV2,
+  stripTrailingSlash,
+} from "./config-schema";
 import { getConfigPath, ensureConfigDir } from "./config";
 import { writeJsonAtomic } from "./atomic-write";
 import { normalizePath } from "./path-normalize";
@@ -86,6 +92,48 @@ export function addBinding(
     binding,
     replaced,
   };
+}
+
+/** Same normalisation the config applies on load, so spellings still match. */
+function serverKey(apiBaseUrl: string): string {
+  return stripTrailingSlash(migrateLegacyHost(apiBaseUrl));
+}
+
+/**
+ * The device id this machine already uses on a server, if any directory is
+ * connected to it. A device id is per server, not per directory: minting one
+ * per `connect` made one machine show up as several devices to the same
+ * organization. The default server is deliberately not consulted — its id
+ * belongs to `login`, and bindings never share it.
+ */
+export function findDeviceIdForServer(
+  config: CollectorConfigV2,
+  apiBaseUrl: string
+): string | undefined {
+  const key = serverKey(apiBaseUrl);
+  return config.bindings.find(
+    (b) => b.server.device_id && serverKey(b.server.api_base_url) === key
+  )?.server.device_id;
+}
+
+/**
+ * Bindings among `bindings` that still use `binding`'s device on its server.
+ * While any remain, revoking that device would cut them off too.
+ */
+export function bindingsSharingDevice(
+  bindings: readonly Binding[],
+  binding: Binding
+): Binding[] {
+  const deviceId = binding.server.device_id;
+  if (!deviceId) return [];
+  const key = serverKey(binding.server.api_base_url);
+  return bindings.filter(
+    (b) =>
+      b !== binding &&
+      b.credential_ref !== binding.credential_ref &&
+      b.server.device_id === deviceId &&
+      serverKey(b.server.api_base_url) === key
+  );
 }
 
 export function removeBinding(
