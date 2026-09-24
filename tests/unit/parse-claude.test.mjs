@@ -6,7 +6,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseClaudeSession } from '../../plugin/hooks/claude/parse-claude.mjs';
+import {
+  parseClaudeSession,
+  convertLineCountedWatermark,
+} from '../../plugin/hooks/claude/parse-claude.mjs';
 
 let tmpDir;
 
@@ -337,5 +340,169 @@ describe('parseClaudeSession — per-day buckets', () => {
     expect(result.byDate.map((b) => b.date)).toEqual(['2024-06-01', '2024-06-02']);
     expect(result.byDate[0].totalTokens).toBe(140);
     expect(result.byDate[1].totalTokens).toBe(280);
+  });
+});
+
+describe('parseClaudeSession — one API response written as several lines', () => {
+  // Claude Code does not write one line per API response. It writes one line
+  // per content block (thinking, text, tool_use), and every one of those lines
+  // carries the same message id, request id, stop_reason and the response's
+  // FULL usage. Summing lines therefore bills a three-block response three
+  // times. Measured against real transcripts this overstated usage by ~1.8x.
+  function makeResponseLines(opts = {}) {
+    const blocks = opts.blocks ?? ['thinking', 'text', 'tool_use'];
+    return blocks.map((blockType, i) => {
+      const entry = makeAssistant({
+        ...opts,
+        timestamp: opts.timestamp ?? `2024-06-01T10:00:00.00${i}Z`,
+      });
+      entry.requestId = opts.requestId ?? 'req_1';
+      entry.message.id = opts.messageId ?? 'msg_1';
+      entry.message.content = [{ type: blockType }];
+      return entry;
+    });
+  }
+
+  it('counts a response once, however many content blocks it was split into', () => {
+    const file = writeTmpJsonl('session.jsonl', makeResponseLines({
+      inputTokens: 10,
+      outputTokens: 200,
+      cacheCreation: 3000,
+      cacheRead: 40000,
+    }));
+
+    const result = parseClaudeSession(file);
+
+    expect(result.inputTokens).toBe(10);
+    expect(result.outputTokens).toBe(200);
+    expect(result.cacheCreationTokens).toBe(3000);
+    expect(result.cacheReadTokens).toBe(40000);
+    expect(result.totalTokens).toBe(43210);
+  });
+
+  it('does not let the block count change the session total', () => {
+    const file = writeTmpJsonl('session.jsonl', [
+      ...makeResponseLines({ messageId: 'msg_a', requestId: 'req_a', blocks: ['text'], outputTokens: 10 }),
+      ...makeResponseLines({ messageId: 'msg_b', requestId: 'req_b', blocks: ['thinking', 'tool_use'], outputTokens: 20 }),
+      ...makeResponseLines({ messageId: 'msg_c', requestId: 'req_c', blocks: ['thinking', 'text', 'tool_use'], outputTokens: 30 }),
+    ]);
+
+    const result = parseClaudeSession(file);
+
+    expect(result.inputTokens).toBe(300);
+    expect(result.outputTokens).toBe(60);
+    expect(result.totalTokens).toBe(360);
+  });
+
+  it('still counts distinct responses that happen to report identical usage', () => {
+    const file = writeTmpJsonl('session.jsonl', [
+      ...makeResponseLines({ messageId: 'msg_a', requestId: 'req_a', blocks: ['text'] }),
+      ...makeResponseLines({ messageId: 'msg_b', requestId: 'req_b', blocks: ['text'] }),
+    ]);
+
+    const result = parseClaudeSession(file);
+
+    expect(result.inputTokens).toBe(200);
+    expect(result.outputTokens).toBe(100);
+  });
+
+  it('counts the cache-write TTL split once per response too', () => {
+    const lines = makeResponseLines({ cacheCreation: 1000 });
+    for (const line of lines) {
+      line.message.usage.cache_creation = {
+        ephemeral_5m_input_tokens: 400,
+        ephemeral_1h_input_tokens: 600,
+      };
+    }
+    const file = writeTmpJsonl('session.jsonl', lines);
+
+    const result = parseClaudeSession(file);
+
+    expect(result.cacheCreationTokens).toBe(1000);
+    expect(result.cacheCreation5mTokens).toBe(400);
+    expect(result.cacheCreation1hTokens).toBe(600);
+  });
+
+  it('keeps the day buckets equal to the deduplicated totals', () => {
+    const file = writeTmpJsonl('session.jsonl', [
+      ...makeResponseLines({ messageId: 'msg_a', requestId: 'req_a', timestamp: '2024-06-01T23:59:59.000Z' }),
+      ...makeResponseLines({ messageId: 'msg_b', requestId: 'req_b', timestamp: '2024-06-02T00:00:01.000Z' }),
+    ]);
+
+    const result = parseClaudeSession(file);
+
+    expect(result.byDate.map((b) => [b.date, b.totalTokens])).toEqual([
+      ['2024-06-01', 150],
+      ['2024-06-02', 150],
+    ]);
+    expect(result.totalTokens).toBe(300);
+  });
+});
+
+describe('convertLineCountedWatermark — ledger records from line-counting collectors', () => {
+  // What a collector that summed lines recorded as sent. Each line repeats its
+  // response's full usage, so a response of n lines was counted n times.
+  function lineCounted(entries) {
+    const sum = (field) => entries.reduce((n, e) => n + e.message.usage[field], 0);
+    const inputTokens = sum('input_tokens');
+    const outputTokens = sum('output_tokens');
+    return { inputTokens, outputTokens, cacheReadTokens: 0, cacheCreationTokens: 0, totalTokens: inputTokens + outputTokens };
+  }
+
+  function response(id, timestamp, blocks, inputTokens, outputTokens) {
+    return Array.from({ length: blocks }, () => {
+      const entry = makeAssistant({ timestamp, inputTokens, outputTokens });
+      entry.requestId = `req_${id}`;
+      entry.message.id = `msg_${id}`;
+      return entry;
+    });
+  }
+
+  const a = response('a', '2024-06-01T10:00:00.000Z', 3, 100, 10);
+  const b = response('b', '2024-06-01T10:05:00.000Z', 2, 200, 20);
+  const c = response('c', '2024-06-01T10:10:00.000Z', 1, 300, 30);
+
+  it('finds the responses a mid-session upload had covered, counting each once', () => {
+    const file = writeTmpJsonl('session.jsonl', [...a, ...b, ...c]);
+
+    const converted = convertLineCountedWatermark(file, lineCounted([...a, ...b]));
+
+    expect(converted.inputTokens).toBe(300);
+    expect(converted.outputTokens).toBe(30);
+    expect(converted.totalTokens).toBe(330);
+    // So the next delta is exactly the response the old upload never saw.
+    expect(parseClaudeSession(file).totalTokens - converted.totalTokens).toBe(330);
+  });
+
+  it('converts a watermark of the whole session to the session total', () => {
+    const file = writeTmpJsonl('session.jsonl', [...a, ...b, ...c]);
+
+    const converted = convertLineCountedWatermark(file, lineCounted([...a, ...b, ...c]));
+    const parsed = parseClaudeSession(file);
+
+    expect(converted.inputTokens).toBe(parsed.inputTokens);
+    expect(converted.outputTokens).toBe(parsed.outputTokens);
+    expect(converted.totalTokens).toBe(parsed.totalTokens);
+  });
+
+  it('replays the parent and its subagents in time order', () => {
+    const mainFile = writeTmpJsonl('abc123.jsonl', [...a, ...c]);
+    const subagentsDir = join(tmpDir, 'abc123', 'subagents');
+    mkdirSync(subagentsDir, { recursive: true });
+    writeFileSync(join(subagentsDir, 'sub1.jsonl'), b.map((l) => JSON.stringify(l)).join('\n') + '\n');
+
+    // The old upload ran after the subagent's response but before c.
+    const converted = convertLineCountedWatermark(mainFile, lineCounted([...a, ...b]));
+
+    expect(converted.totalTokens).toBe(330);
+  });
+
+  it('converts an empty watermark to zero', () => {
+    const file = writeTmpJsonl('session.jsonl', [...a]);
+    expect(convertLineCountedWatermark(file, { totalTokens: 0 }).totalTokens).toBe(0);
+  });
+
+  it('returns null when the transcript cannot be read', () => {
+    expect(convertLineCountedWatermark(join(tmpDir, 'gone.jsonl'), { totalTokens: 500 })).toBeNull();
   });
 });
