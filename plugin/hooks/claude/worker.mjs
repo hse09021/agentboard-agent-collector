@@ -51,6 +51,7 @@ import {
   deriveEventId,
   getSentTotals,
   markTotalsSent,
+  upgradeLineCountedTotals,
   acquireSessionLock,
   releaseSessionLock,
   COLLECTOR_VERSION,
@@ -65,7 +66,7 @@ import { splitSessionDelta, sumPieceTokens } from '../lib/daily-split.mjs';
 import { uploadEvents, registerDevice } from '../lib/transport.mjs';
 import { isRevokedDeviceError, revokedDeviceMessage } from '../lib/revoked.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
-import { parseClaudeSession } from './parse-claude.mjs';
+import { parseClaudeSession, convertLineCountedWatermark } from './parse-claude.mjs';
 import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
 
 // ─── Source detection ─────────────────────────────────────────────────────────
@@ -322,6 +323,15 @@ async function main() {
   // `cumulative` is kept as the figure to persist afterwards.
   const cumulative = parsed;
   let pieces = [];
+  // A record written before per-response counting holds an inflated
+  // watermark; converted once here, or this session's new usage would be held
+  // back until it outgrew the inflated figure.
+  const upgraded = upgradeLineCountedTotals(sessionId, (lineCounted) =>
+    convertLineCountedWatermark(transcriptPath, lineCounted)
+  );
+  if (upgraded) {
+    workerLog(`ledger converted to per-response counting: ${upgraded.from} -> ${upgraded.to}`);
+  }
   // Read once, outside the branch: the watermark this delta was computed
   // against is part of what makes each event's id deterministic, so the event
   // builder below needs the same value.

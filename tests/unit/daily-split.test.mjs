@@ -10,7 +10,6 @@ import { describe, it, expect } from 'vitest';
 import {
   addToDayBucket,
   sortDayBuckets,
-  mergeDayBuckets,
   splitDeltaByDate,
   splitSessionDelta,
   sumPieceTokens,
@@ -84,37 +83,6 @@ describe('addToDayBucket', () => {
     ]);
 
     expect(buckets.map((b) => b.date)).toEqual(['2024-06-01', '2024-06-02', '2024-06-03']);
-  });
-});
-
-describe('mergeDayBuckets', () => {
-  it('folds a subagent list into the parent on matching days', () => {
-    const parent = buildBuckets([['2024-06-01T10:00:00.000Z', turn(100, 10)]]);
-    const child = buildBuckets([
-      ['2024-06-01T14:00:00.000Z', turn(50, 5)],
-      ['2024-06-02T09:00:00.000Z', turn(70, 7)],
-    ]);
-
-    const merged = mergeDayBuckets(parent, child);
-
-    expect(merged.map((b) => b.date)).toEqual(['2024-06-01', '2024-06-02']);
-    expect(merged[0].totalTokens).toBe(165);
-    expect(merged[0].endedAt).toBe('2024-06-01T14:00:00.000Z');
-    expect(merged[1].totalTokens).toBe(77);
-  });
-
-  it('does not mutate its inputs', () => {
-    const parent = buildBuckets([['2024-06-01T10:00:00.000Z', turn(100, 10)]]);
-    const child = buildBuckets([['2024-06-01T14:00:00.000Z', turn(50, 5)]]);
-
-    mergeDayBuckets(parent, child);
-
-    expect(parent[0].totalTokens).toBe(110);
-    expect(child[0].totalTokens).toBe(55);
-  });
-
-  it('tolerates empty and missing lists', () => {
-    expect(mergeDayBuckets([], undefined)).toEqual([]);
   });
 });
 

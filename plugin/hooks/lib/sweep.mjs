@@ -45,6 +45,7 @@ import {
   getSentTotals,
   markTotalsSeeded,
   markTotalsSentMonotonic,
+  upgradeLineCountedTotals,
   acquireSessionLock,
   releaseSessionLock,
 } from './config.mjs';
@@ -61,7 +62,7 @@ import { splitSessionDelta } from './daily-split.mjs';
 import { uploadEvents } from './transport.mjs';
 import { resolveUploadContextWithRefresh } from './upload-context.mjs';
 import { assertNoForbiddenFields } from './forbidden-data-guard.mjs';
-import { parseClaudeSession } from '../claude/parse-claude.mjs';
+import { parseClaudeSession, convertLineCountedWatermark } from '../claude/parse-claude.mjs';
 import { parseCodexFile } from '../codex/parse-codex.mjs';
 
 export const SWEEP_STATE_PATH = join(CONFIG_DIR, 'sweep-state.json');
@@ -381,6 +382,15 @@ export async function sweepOneSession(candidate, ctx = {}) {
   }
 
   try {
+    // Before anything reads or writes this session's record: see
+    // upgradeLineCountedTotals for why an unconverted one must not reach the
+    // monotonic write below.
+    if (source === 'claude_code') {
+      upgradeLineCountedTotals(sessionId, (lineCounted) =>
+        convertLineCountedWatermark(candidate.filePath, lineCounted)
+      );
+    }
+
     // Guardrail 2. `endedAt` comes from the file's own content, so a machine
     // whose clock jumped backwards cannot make a live session look stale and
     // get its tokens silently swallowed by the seed path. A future mtime counts

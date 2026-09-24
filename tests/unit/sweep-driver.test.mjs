@@ -238,6 +238,55 @@ describe('guardrail 2 — no retroactive flood', () => {
   });
 });
 
+describe('ledger records from line-counting collectors', () => {
+  // Claude Code writes a response as one line per content block, each repeating
+  // the response's usage. A collector that summed lines recorded a watermark
+  // inflated by the block count; left as it was, the session's new usage would
+  // be held back until it outgrew that figure.
+  it('uploads exactly the responses added since, not zero and not the inflated delta', async () => {
+    await bootstrap();
+    const sid = 'dddddddd-0000-0000-0000-000000000004';
+    const dir = join(homeDir, '.claude', 'projects', 'c--work-proj');
+    mkdirSync(dir, { recursive: true });
+
+    const line = (id, ts, inputTokens) => ({
+      type: 'assistant',
+      timestamp: ts,
+      cwd: '/work/proj',
+      requestId: `req_${id}`,
+      message: {
+        id: `msg_${id}`,
+        model: 'claude-opus-5',
+        stop_reason: 'tool_use',
+        usage: { input_tokens: inputTokens, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+    });
+    const earlier = new Date(Date.now() - 60_000).toISOString();
+    const now = new Date().toISOString();
+    // Response a (three blocks) was uploaded by the old collector as 3 x 110;
+    // response b arrived afterwards.
+    const lines = [line('a', earlier, 100), line('a', earlier, 100), line('a', earlier, 100), line('b', now, 40)];
+    writeFileSync(join(dir, `${sid}.jsonl`), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    writeFileSync(
+      config.HOOK_SENT_PATH,
+      JSON.stringify({
+        [`claude_code:${sid}`]: {
+          sentAt: earlier,
+          totals: { inputTokens: 300, outputTokens: 30, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 330 },
+          route: 'default',
+        },
+      })
+    );
+
+    const sent = [];
+    await sweep.runSweep({ uploader: recordingUploader(sent) });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].events.reduce((n, e) => n + e.total_tokens, 0)).toBe(50);
+    expect(config.getSentTotals('claude_code', sid).totalTokens).toBe(160);
+  });
+});
+
 describe('guardrail 4 — per-session routing', () => {
   const orgBinding = {
     abs_dir: '/work/org',

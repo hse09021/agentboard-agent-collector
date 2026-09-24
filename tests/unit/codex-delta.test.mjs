@@ -181,3 +181,63 @@ describe('resumed Claude Code session', () => {
     expect(delta.cacheCreationTokens).toBe(3802);
   });
 });
+
+describe('Claude Code records written before per-response counting', () => {
+  const sessionId = 'line-counted';
+
+  function writeRecord(record) {
+    writeFileSync(config.HOOK_SENT_PATH, JSON.stringify({ [`claude_code:${sessionId}`]: record }));
+  }
+
+  it('converts a record without the marker once, keeping its route and sentAt', () => {
+    writeRecord({ sentAt: '2026-09-01T00:00:00.000Z', totals: totals(300, 30, 0), route: 'binding:acme' });
+    const convert = vi.fn(() => totals(100, 10, 0));
+
+    const first = config.upgradeLineCountedTotals(sessionId, convert);
+    const second = config.upgradeLineCountedTotals(sessionId, convert);
+
+    expect(first).toEqual({ from: 330, to: 110 });
+    expect(second).toBeNull();
+    expect(convert).toHaveBeenCalledTimes(1);
+    expect(convert).toHaveBeenCalledWith(totals(300, 30, 0));
+    expect(config.getSentTotals('claude_code', sessionId).totalTokens).toBe(110);
+    expect(config.getSentRoute('claude_code', sessionId)).toBe('binding:acme');
+    expect(config.loadHookSent()[`claude_code:${sessionId}`].sentAt).toBe('2026-09-01T00:00:00.000Z');
+  });
+
+  it('keeps a seeded record seeded', () => {
+    writeRecord({ sentAt: '2026-09-01T00:00:00.000Z', totals: totals(300, 30, 0), seeded: true });
+
+    config.upgradeLineCountedTotals(sessionId, () => totals(100, 10, 0));
+
+    expect(config.getSentRoute('claude_code', sessionId)).toBeNull();
+  });
+
+  it('never converts what this collector wrote', () => {
+    config.markTotalsSent('claude_code', sessionId, totals(100, 10, 0));
+    const convert = vi.fn();
+
+    expect(config.upgradeLineCountedTotals(sessionId, convert)).toBeNull();
+    expect(convert).not.toHaveBeenCalled();
+  });
+
+  it('marks records from every Claude Code writer, and no Codex ones', () => {
+    config.markTotalsSent('claude_code', 'a', totals(1, 1, 0));
+    config.markTotalsSeeded('claude_code', 'b', totals(1, 1, 0));
+    config.markTotalsSentMonotonic('claude_code', 'c', totals(1, 1, 0));
+    config.markTotalsSent('codex', 'd', totals(1, 1, 0));
+
+    const sent = config.loadHookSent();
+    expect(sent['claude_code:a'].counting).toBe('per-response');
+    expect(sent['claude_code:b'].counting).toBe('per-response');
+    expect(sent['claude_code:c'].counting).toBe('per-response');
+    expect(sent['codex:d'].counting).toBeUndefined();
+  });
+
+  it('leaves the record for next time when it cannot be converted', () => {
+    writeRecord({ sentAt: '2026-09-01T00:00:00.000Z', totals: totals(300, 30, 0) });
+
+    expect(config.upgradeLineCountedTotals(sessionId, () => null)).toBeNull();
+    expect(config.getSentTotals('claude_code', sessionId).totalTokens).toBe(330);
+  });
+});

@@ -400,6 +400,16 @@ function normalizeTotals(totals) {
   };
 }
 
+// Claude Code records carry this once their totals count each API response
+// once. Collectors before it summed transcript lines, and Claude Code repeats a
+// response's usage on every line of it (one per content block), so a record
+// without the marker holds an inflated watermark — see upgradeLineCountedTotals.
+const PER_RESPONSE = 'per-response';
+
+function countingMarker(source) {
+  return source === 'claude_code' ? { counting: PER_RESPONSE } : {};
+}
+
 /**
  * Return the cumulative token totals already uploaded for a session, or a
  * zero-filled object when nothing has been sent yet.
@@ -448,6 +458,7 @@ export function markTotalsSent(source, sessionId, totals, route) {
   sent[key] = {
     sentAt: new Date().toISOString(),
     totals: normalizeTotals(totals),
+    ...countingMarker(source),
     ...(route ?? previous?.route ? { route: route ?? previous.route } : {}),
   };
   saveHookSent(sent);
@@ -472,6 +483,7 @@ export function markTotalsSeeded(source, sessionId, totals) {
   sent[key] = {
     sentAt: new Date().toISOString(),
     totals: normalizeTotals(totals),
+    ...countingMarker(source),
     seeded: true,
   };
   saveHookSent(sent);
@@ -510,9 +522,38 @@ export function markTotalsSentMonotonic(source, sessionId, totals, route) {
       cacheReadTokens: Math.max(prior.cacheReadTokens, next.cacheReadTokens),
       totalTokens: Math.max(prior.totalTokens, next.totalTokens),
     },
+    ...countingMarker(source),
     ...(route ?? previous?.route ? { route: route ?? previous.route } : {}),
   };
   saveHookSent(sent);
+}
+
+/**
+ * Convert a Claude Code session's record written before per-response counting,
+ * once. `convert` receives the record's line-counted totals and returns them
+ * per response, or null when it cannot — the record is then left as it is and
+ * tried again next time.
+ *
+ * Must run under the session lock and before the record is read for a delta:
+ * markTotalsSentMonotonic takes the max against the prior record, so an
+ * unconverted one would pin the watermark at its inflated value for good.
+ *
+ * @returns {{from: number, to: number} | null} total tokens before and after,
+ *   or null when there was nothing to convert
+ */
+export function upgradeLineCountedTotals(sessionId, convert) {
+  const sent = loadHookSent();
+  const key = hookSentKey('claude_code', sessionId);
+  const record = sent[key];
+  if (!record || record.counting === PER_RESPONSE) return null;
+
+  const lineCounted = normalizeTotals(record.totals);
+  const converted = convert(lineCounted);
+  if (!converted) return null;
+
+  sent[key] = { ...record, totals: normalizeTotals(converted), counting: PER_RESPONSE };
+  saveHookSent(sent);
+  return { from: lineCounted.totalTokens, to: sent[key].totals.totalTokens };
 }
 
 /**

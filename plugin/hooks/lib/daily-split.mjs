@@ -89,31 +89,6 @@ export function sortDayBuckets(buckets) {
 }
 
 /**
- * Merge per-day bucket lists (Claude folds each subagent transcript's buckets
- * into the parent session's). Returns a fresh date-ascending array; inputs are
- * not mutated.
- */
-export function mergeDayBuckets(...lists) {
-  const buckets = new Map();
-  for (const list of lists) {
-    if (!Array.isArray(list)) continue;
-    for (const bucket of list) {
-      const existing = buckets.get(bucket.date);
-      if (!existing) {
-        buckets.set(bucket.date, { ...bucket });
-        continue;
-      }
-      if (bucket.startedAt < existing.startedAt) existing.startedAt = bucket.startedAt;
-      if (bucket.endedAt > existing.endedAt) existing.endedAt = bucket.endedAt;
-      for (const field of TOKEN_FIELDS) {
-        existing[field] += toNN(bucket[field]);
-      }
-    }
-  }
-  return sortDayBuckets(buckets);
-}
-
-/**
  * Split the not-yet-uploaded part of a session across the days it happened on.
  *
  * `alreadySent` is a flat cumulative total with no day breakdown — that is all
