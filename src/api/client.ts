@@ -16,10 +16,13 @@ export class ApiClient {
   /**
    * Whether this client may rotate its own credential.
    *
-   * Only the default route's token is part of a refresh family. A per-project
-   * `.cred` (from `agentboard connect`) is a separate enrollment credential
-   * that the server does not rotate, and submitting it to the refresh endpoint
-   * would be a straight error — so clients built for those routes opt out.
+   * Only for the default route. A connected project's `.cred` rotates too, but
+   * it is a different server's token, and the refresh behind this flag
+   * (ensureFreshToken) reads and writes `.token` and posts its refresh token to
+   * this client's base URL. Turned on for a project client, it would hand the
+   * default server's refresh token to the organization's server. Project
+   * credentials are rotated by the hooks (plugin/hooks/lib/project-credential.mjs),
+   * so clients built for those routes opt out.
    */
   private readonly autoRefresh: boolean;
 
@@ -174,8 +177,9 @@ export class ApiError extends Error {
 }
 
 /**
- * A client for an arbitrary credential (e.g. a per-project `.cred`). Does not
- * rotate — see ApiClient#autoRefresh.
+ * A client for an arbitrary credential (e.g. a per-project `.cred`). Never
+ * rotates: the credential may belong to a different server from `.token` — see
+ * ApiClient#autoRefresh.
  */
 export function createApiClient(baseUrl: string, authToken: string): ApiClient {
   return new ApiClient(baseUrl, authToken);

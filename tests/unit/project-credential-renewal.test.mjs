@@ -99,10 +99,16 @@ describe('isProjectRenewalDue', () => {
 describe('ensureFreshProjectCredential', () => {
   const input = (value) => ({ apiBaseUrl: `${API}/`, credentialRef: REF, credential: value, deviceId: DEVICE });
 
-  it('leaves a credential outside the window alone, without calling the server', async () => {
-    const { ensureFreshProjectCredential } = await load();
+  // ★ 옛 서버는 renew마다 새 90일 자격증명을 준다. 서버가 오늘 이미 답했으면
+  //   창 밖의 레거시 자격증명으로 다시 묻지 않는다.
+  it('leaves a legacy credential outside the window alone once the server answered today', async () => {
+    const { ensureFreshProjectCredential, PROJECT_RENEWAL_PATH } = await load();
     const current = credential(60);
     writeCred(current);
+    writeFileSync(
+      PROJECT_RENEWAL_PATH,
+      JSON.stringify({ v: 1, upgrades: { [REF]: { at: new Date(NOW - 60 * 60 * 1000).toISOString(), outcome: 'legacy' } } }),
+    );
     const fetchImpl = vi.fn();
 
     const result = await ensureFreshProjectCredential(input(current), { fetchImpl, nowMs: NOW });
@@ -127,12 +133,12 @@ describe('ensureFreshProjectCredential', () => {
     expect(init.method).toBe('POST');
     expect(init.headers.Authorization).toBe(`Bearer ${current}`);
     expect(init.headers['User-Agent']).toBe(`agentboard-collector/${COLLECTOR_VERSION}`);
-    expect(JSON.parse(init.body)).toEqual({ device_id: DEVICE });
+    expect(JSON.parse(init.body)).toEqual({ device_id: DEVICE, v: 2 });
     expect(readFileSync(credPath(), 'utf-8')).toBe(next);
   });
 
   it('records a refusal once, keeps the current credential, and clears it after a later renewal', async () => {
-    const { ensureFreshProjectCredential, PROJECT_RENEWAL_PATH } = await load();
+    const { ensureFreshProjectCredential, PROJECT_RENEWAL_PATH, readProjectRenewalFailures } = await load();
     const current = credential(10);
     writeCred(current);
     // A Response body can be read once, so each call gets its own.
@@ -155,7 +161,7 @@ describe('ensureFreshProjectCredential', () => {
       fetchImpl: vi.fn().mockResolvedValue(renewedResponse(next)),
       nowMs: NOW,
     });
-    expect(existsSync(PROJECT_RENEWAL_PATH)).toBe(false);
+    expect(readProjectRenewalFailures()).toEqual({});
   });
 
   it('treats server errors, network failures, and unusable replies as transient', async () => {

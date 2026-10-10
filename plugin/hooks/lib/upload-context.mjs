@@ -14,6 +14,7 @@ import { resolveRoute } from './routing.mjs';
 import { ensureFreshToken } from './token-refresh.mjs';
 import { recordAuthFailure } from './auth-failure.mjs';
 import { ensureFreshProjectCredential } from './project-credential.mjs';
+import { uploadEvents } from './transport.mjs';
 
 /**
  * @param {{source: string, sessionId: string, cwd?: string|null}} input
@@ -58,12 +59,15 @@ export function resolveUploadContext({ source, sessionId, cwd }) {
  * resolveUploadContext, plus a rotated access token or a renewed project
  * credential when one is due.
  *
- * The two routes renew differently, so the branch is explicit rather than
- * incidental. The DEFAULT route (`credentialRef === null`, the `.token` bundle)
- * rotates through the refresh endpoint. A connected project's `.cred` is a
- * separate enrollment credential that is not part of any refresh family —
- * sending it to the refresh endpoint would be an error, and a confusing one to
- * debug — so it renews through /v1/collector/renew instead.
+ * The two routes renew separately, so the branch is explicit rather than
+ * incidental. Both rotate an access/refresh pair now, but they are different
+ * servers' tokens: the DEFAULT route (`credentialRef === null`) is `.token`
+ * from the server the user logged into, a connected project's `.cred` is from
+ * its organization's server. A refresh token sent to the other server is
+ * refused, but only after its operator has seen it. So the default route goes
+ * through ensureFreshToken (`.token`, `.token.lock`) and a project through
+ * ensureFreshProjectCredential (its `.cred`, its own lock), each to its own
+ * route's api_base_url, and neither path ever touches the other's files.
  *
  * Never fails the upload over a refresh problem: a transient failure keeps the
  * current token (it is usually still valid), and a permanently dead refresh
@@ -115,4 +119,53 @@ export async function resolveUploadContextWithRefresh(input, log = () => {}) {
 
   log(`refresh unavailable: ${outcome.reason} — continuing with current token`);
   return context;
+}
+
+/**
+ * Whether an upload failed because the server refused the bearer token.
+ *
+ * @param {unknown} err error thrown by uploadEvents
+ */
+export function isUnauthorizedError(err) {
+  return /^HTTP 401\b/.test(err?.message ?? '');
+}
+
+/**
+ * Uploads with the context's credential. When a connected project's server
+ * answers 401, rotates that project's credential once and retries once — an
+ * access token lasts an hour, so one that expired between the pre-emptive
+ * check and the upload is routine. Never loops.
+ *
+ * The default route keeps its old behaviour (no retry here): a 401 there
+ * surfaces as an upload failure exactly as before.
+ *
+ * On a retry `context.token` is replaced, so anything the caller sends next
+ * (a device re-registration, say) uses the credential that worked.
+ *
+ * @param {{route: {credentialRef: string|null}, apiBaseUrl: string, deviceId: string, token: string}} context
+ * @param {object[]} events
+ * @param {(msg: string) => void} [log]
+ * @param {typeof uploadEvents} [uploader]
+ */
+export async function uploadWithContext(context, events, log = () => {}, uploader = uploadEvents) {
+  try {
+    return await uploader(context.apiBaseUrl, context.token, context.deviceId, events);
+  } catch (err) {
+    if (!isUnauthorizedError(err) || context.route.credentialRef === null) throw err;
+
+    const renewal = await ensureFreshProjectCredential(
+      {
+        apiBaseUrl: context.apiBaseUrl,
+        credentialRef: context.route.credentialRef,
+        credential: context.token,
+        deviceId: context.deviceId,
+      },
+      { force: true },
+    );
+    log(`upload got 401; project credential ${renewal.kind}${renewal.reason ? `: ${renewal.reason}` : ''}`);
+    if (renewal.credential === context.token) throw err;
+
+    context.token = renewal.credential;
+    return uploader(context.apiBaseUrl, context.token, context.deviceId, events);
+  }
 }

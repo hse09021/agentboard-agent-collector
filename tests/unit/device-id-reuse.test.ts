@@ -152,7 +152,12 @@ describe("reconnecting a directory", () => {
       });
       expect(second.replaced?.credential_ref).toBe("old");
 
-      const deps = { loadCredential: vi.fn().mockReturnValue("cred"), deleteCredential: vi.fn(), notify: vi.fn() };
+      const deps = {
+        loadCredential: vi.fn().mockReturnValue({ v: 1, access: "cred", refresh: null }),
+        deleteCredential: vi.fn(),
+        notify: vi.fn(),
+        revokeRefresh: vi.fn(),
+      };
       const notice = await retireBinding(second.replaced!, second.config.bindings, deps);
 
       expect(notice).toEqual({ ok: true, kept: "shared", sharedWith: 1 });

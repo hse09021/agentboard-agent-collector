@@ -51,3 +51,37 @@ export async function notifyDeviceDisconnected(
     return { ok: false, reason: (err as Error).message };
   }
 }
+
+export type RefreshRevokeNotice = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Revokes a connected project's refresh token, and with it its whole family.
+ *
+ * Unauthenticated: the refresh token in the body is the credential. It goes to
+ * the connection's own server only — it was issued there, and nowhere else has
+ * any business seeing it.
+ *
+ * Best-effort, like the disconnect notice. A server without rotation has no
+ * such endpoint and answers 404; it also never issued a refresh token, so a
+ * connection holding one is not talking to such a server in practice.
+ */
+export async function revokeProjectRefresh(
+  apiBaseUrl: string,
+  refreshToken: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<RefreshRevokeNotice> {
+  try {
+    const response = await fetchImpl(`${apiBaseUrl.replace(/\/+$/, "")}/v1/collector/revoke`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": `agentboard-collector/${COLLECTOR_VERSION}`,
+      },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    return response.ok ? { ok: true } : { ok: false, reason: `HTTP ${response.status}` };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}

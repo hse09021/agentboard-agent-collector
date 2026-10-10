@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -205,9 +205,9 @@ describe('resolveUploadContextWithRefresh', () => {
     expect(ctx.token).toBe('new');
   });
 
-  // .cred 는 프로젝트 단위 등록 자격증명이라 회전 대상이 아니다. 여기에 refresh 를
-  // 시도하면 엉뚱한 에러가 나고, 최악의 경우 디버깅이 어려운 실패가 된다.
-  it('never refreshes a per-project .cred route', async () => {
+  // ★ .cred 는 조직 서버의 토큰이고 .token 은 기본 서버의 토큰이다. 프로젝트 라우트에서
+  //   .token 을 갱신하면 기본 서버의 refresh 토큰이 조직 서버로 간다.
+  it('never refreshes .token for a per-project .cred route', async () => {
     writeConfig({
       bindings: [
         {
@@ -240,7 +240,14 @@ describe('resolveUploadContextWithRefresh', () => {
 
     expect(ctx.ok).toBe(true);
     expect(ctx.token).toBe('project-credential');
-    expect(fetchSpy).not.toHaveBeenCalled();
+    // The only request is the project's own renewal, to its own server, with
+    // its own credential. Nothing from .token leaves the machine.
+    for (const [url, init] of fetchSpy.mock.calls) {
+      expect(url).toBe('https://other.example.test/v1/collector/renew');
+      expect(init.headers.Authorization).toBe('Bearer project-credential');
+      expect(String(init.body)).not.toMatch(/old|r1/);
+    }
+    expect(JSON.parse(readFileSync(join(configDir, '.token'), 'utf-8'))).toMatchObject({ access: 'old', refresh: 'r1' });
   });
 
   // 갱신 실패로 업로드를 포기하면 토큰이 아직 살아 있는 경우까지 버리게 된다.

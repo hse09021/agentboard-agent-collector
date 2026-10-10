@@ -118,8 +118,11 @@ async function postRefresh(apiBaseUrl, refreshToken) {
  * Ensures a usable access token for the DEFAULT route, rotating if it is close
  * to expiry.
  *
- * Only ever called for the default route: a per-project `.cred` is a separate
- * enrollment credential the server does not rotate.
+ * Only ever called for the default route. A connected project's `.cred` is a
+ * different server's token and rotates through project-credential.mjs; this
+ * function reads `.token` and posts its refresh token to `apiBaseUrl`, so
+ * calling it for a project route would send the default server's refresh token
+ * to the organization's server.
  *
  * @param {string} apiBaseUrl
  * @param {{force?: boolean, nowMs?: number}} [options]

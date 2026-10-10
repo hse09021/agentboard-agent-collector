@@ -11,6 +11,11 @@
  * cut off the directories still connected — including, when `connect`
  * replaces a connection, the one it has just made.
  *
+ * A connection holding an access/refresh pair has its own refresh family on
+ * top of that, and it is revoked every time: the family belongs to this one
+ * connection, so no other directory is cut off by it, and a refresh token that
+ * outlives its connection is a bearer nobody is watching.
+ *
  * Order matters and is the caller's responsibility: save the config without
  * this binding FIRST, then retire it against what remains. Local state is authoritative. If the
  * server were told first and the config write then failed, the hooks would
@@ -19,19 +24,30 @@
 
 import type { Binding } from "./config-schema";
 import { bindingsSharingDevice } from "./bindings";
-import { deleteCredential, loadCredential } from "../platform/credential-store";
-import { notifyDeviceDisconnected, type DisconnectNotice } from "../api/project-device";
+import {
+  deleteCredential,
+  loadProjectCredential,
+  type ProjectCredential,
+} from "../platform/credential-store";
+import {
+  notifyDeviceDisconnected,
+  revokeProjectRefresh,
+  type DisconnectNotice,
+  type RefreshRevokeNotice,
+} from "../api/project-device";
 
 export interface RetireDeps {
-  loadCredential: (ref: string) => string | null;
+  loadCredential: (ref: string) => ProjectCredential | null;
   deleteCredential: (ref: string) => void;
   notify: (apiBaseUrl: string, credential: string, deviceId: string) => Promise<DisconnectNotice>;
+  revokeRefresh: (apiBaseUrl: string, refreshToken: string) => Promise<RefreshRevokeNotice>;
 }
 
 const defaultDeps: RetireDeps = {
-  loadCredential,
+  loadCredential: loadProjectCredential,
   deleteCredential,
   notify: (api, credential, deviceId) => notifyDeviceDisconnected(api, credential, deviceId),
+  revokeRefresh: (api, refreshToken) => revokeProjectRefresh(api, refreshToken),
 };
 
 /**
@@ -45,13 +61,16 @@ export interface DeviceKept {
   sharedWith: number;
 }
 
-export type RetireOutcome = DisconnectNotice | DeviceKept;
+export type RetireOutcome = (DisconnectNotice | DeviceKept) & {
+  /** Set when the connection held a refresh token: whether it was revoked. */
+  refresh?: RefreshRevokeNotice;
+};
 
 /**
  * Tells the binding's server to revoke its device, unless a binding in
- * `remaining` still uses it, then deletes the local credential. The credential
- * is deleted either way — it belongs to a connection that no longer exists.
- * Never throws.
+ * `remaining` still uses it, and to revoke the connection's refresh token if it
+ * has one. Then deletes the local credential — either way, since it belongs to
+ * a connection that no longer exists. Never throws.
  */
 export async function retireBinding(
   binding: Binding,
@@ -59,21 +78,34 @@ export async function retireBinding(
   deps: RetireDeps = defaultDeps
 ): Promise<RetireOutcome> {
   let notice: RetireOutcome;
+  let stored: ProjectCredential | null = null;
   try {
-    const credential = deps.loadCredential(binding.credential_ref);
+    stored = deps.loadCredential(binding.credential_ref);
     const deviceId = binding.server.device_id;
     const sharing = bindingsSharingDevice(remaining, binding);
     if (sharing.length > 0) {
       notice = { ok: true, kept: "shared", sharedWith: sharing.length };
-    } else if (!credential) {
+    } else if (!stored) {
       notice = { ok: false, reason: "the stored credential is missing" };
     } else if (!deviceId) {
       notice = { ok: false, reason: "this connection has no device id" };
     } else {
-      notice = await deps.notify(binding.server.api_base_url, credential, deviceId);
+      // The stored access token is the bearer even when it has expired; the
+      // server accepts it for this.
+      notice = await deps.notify(binding.server.api_base_url, stored.access, deviceId);
     }
   } catch (err) {
     notice = { ok: false, reason: (err as Error).message };
+  }
+
+  // After the device notice, not before: revoking the family first could
+  // leave the server refusing the access token that notice is sent with.
+  if (stored?.refresh) {
+    try {
+      notice.refresh = await deps.revokeRefresh(binding.server.api_base_url, stored.refresh);
+    } catch (err) {
+      notice.refresh = { ok: false, reason: (err as Error).message };
+    }
   }
 
   try {
