@@ -45,8 +45,6 @@ const WORKER_MAX_LIFETIME_MS = 60_000;
 
 import {
   loadConfigV2,
-  loadRouteCredential,
-  getSentRoute,
   generateEventId,
   deriveEventId,
   getSentTotals,
@@ -56,14 +54,11 @@ import {
   releaseSessionLock,
   COLLECTOR_VERSION,
 } from '../lib/config.mjs';
-import { resolveRoute } from '../lib/routing.mjs';
-import { ensureFreshToken } from '../lib/token-refresh.mjs';
-import { recordAuthFailure } from '../lib/auth-failure.mjs';
-import { ensureFreshProjectCredential } from '../lib/project-credential.mjs';
+import { resolveUploadContextWithRefresh, uploadWithContext } from '../lib/upload-context.mjs';
 import { recordAgentHomesFromEnv } from '../lib/agent-homes.mjs';
 import { isSweepEnabled, maybeSpawnSweep } from '../lib/sweep.mjs';
 import { splitSessionDelta, sumPieceTokens } from '../lib/daily-split.mjs';
-import { uploadEvents, registerDevice } from '../lib/transport.mjs';
+import { registerDevice } from '../lib/transport.mjs';
 import { isRevokedDeviceError, revokedDeviceMessage } from '../lib/revoked.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
 import { parseClaudeSession, convertLineCountedWatermark } from './parse-claude.mjs';
@@ -229,61 +224,28 @@ async function main() {
   // `cwd` comes from the hook payload only — never process.cwd(), which is
   // whatever the AI tool happened to launch us with and would misroute. It is
   // read here and never uploaded.
-  const pinnedRoute = getSentRoute(source, sessionId);
-  const route = resolveRoute({ config, cwd: payload.cwd, pinnedRouteId: pinnedRoute });
-
-  if (route.kind === 'blocked') {
-    // The pinned route's binding is gone. Silently falling back to another
-    // server would ship this organization's telemetry somewhere it was never
-    // meant to go; the tokens stay in the ledger and are recovered if the
-    // binding is restored.
-    workerLog(`SKIP: session pinned to a route that no longer exists (${pinnedRoute})`);
+  //
+  // The same step rotates the access token, or the project credential, if it
+  // is close to expiring. Shared with the Codex hooks and the sweep
+  // (upload-context.mjs), so there is one place that decides which server a
+  // token goes to: the default route's `.token` and a connected project's
+  // `.cred` are different servers' tokens, and sending either to the other
+  // server would show it to that server's operator. A pinned route whose
+  // binding is gone is skipped rather than falling back to another server; its
+  // tokens stay in the ledger and are recovered if the binding is restored.
+  //
+  // Never blocks the upload: transient failures keep the current credential,
+  // and a permanent refusal is recorded for the next CLI run, since nobody
+  // reads a hook's stderr.
+  const ctx = await resolveUploadContextWithRefresh(
+    { source, sessionId, cwd: payload.cwd },
+    (msg) => workerLog(msg)
+  );
+  if (!ctx.ok) {
+    workerLog(`SKIP: ${ctx.reason}`);
     process.exit(0);
   }
-
-  const apiBaseUrl = route.server.api_base_url;
-  const deviceId = route.server.device_id ?? config.device_id;
-  let token = loadRouteCredential(route.credentialRef);
-
-  if (!token || !deviceId) {
-    workerLog(`SKIP: no credential for route=${route.routeId} (not logged in / not connected)`);
-    process.exit(0);
-  }
-
-  // 3.4 Rotate the access token, or renew the project credential, if it is close
-  //     to expiring.
-  //
-  // The DEFAULT route (credentialRef === null, the `.token` bundle) rotates
-  // through the refresh endpoint. A connected project's `.cred` is a separate
-  // enrollment credential — sending it to the refresh endpoint would fail — so
-  // it renews through /v1/collector/renew instead.
-  //
-  // Neither ever blocks the upload: transient failures keep the current
-  // credential, and a permanent refusal is recorded for the next CLI run, since
-  // nobody reads a hook's stderr.
-  if (route.credentialRef === null) {
-    const outcome = await ensureFreshToken(apiBaseUrl);
-    if (outcome.kind === 'refreshed' || outcome.kind === 'current') {
-      token = outcome.bundle.access;
-      if (outcome.kind === 'refreshed') workerLog('token refreshed');
-    } else if (outcome.kind === 'reauth_required') {
-      workerLog(`refresh rejected: ${outcome.reason} — re-login required`);
-      recordAuthFailure({ reason: outcome.reason, source, apiBaseUrl });
-    } else {
-      workerLog(`refresh unavailable: ${outcome.reason} — continuing with current token`);
-    }
-  } else {
-    const renewal = await ensureFreshProjectCredential({
-      apiBaseUrl,
-      credentialRef: route.credentialRef,
-      credential: token,
-      deviceId,
-    });
-    token = renewal.credential;
-    if (renewal.kind !== 'current') {
-      workerLog(`project credential ${renewal.kind}${renewal.reason ? `: ${renewal.reason}` : ''}`);
-    }
-  }
+  const { route, apiBaseUrl, deviceId, pinnedRoute } = ctx;
 
   workerLog(`route=${route.routeId} api=${apiBaseUrl} pinned=${pinnedRoute ?? 'none'}`);
 
@@ -408,7 +370,7 @@ async function main() {
     workerLog(
       `uploading ${events.length} event(s) total_tokens=${events.reduce((n, e) => n + e.total_tokens, 0)}`
     );
-    verdict = await uploadEvents(apiBaseUrl, token, deviceId, events);
+    verdict = await uploadWithContext(ctx, events, workerLog);
   } catch (err) {
     // A wiped or reinstalled server no longer knows this device. Nothing else
     // re-registers from the hook path, so without this every developer goes
@@ -429,13 +391,13 @@ async function main() {
     }
 
     workerLog('device_not_found — attempting re-registration');
-    const reregistered = await registerDevice(apiBaseUrl, token, deviceId, { os: detectOs() });
+    const reregistered = await registerDevice(apiBaseUrl, ctx.token, deviceId, { os: detectOs() });
     if (!reregistered) {
       workerLog('ERROR: re-registration failed');
       process.exit(1);
     }
     try {
-      verdict = await uploadEvents(apiBaseUrl, token, deviceId, events);
+      verdict = await uploadWithContext(ctx, events, workerLog);
       workerLog('upload success after re-registration');
     } catch (retryErr) {
       workerLog(`ERROR: upload failed after re-registration: ${retryErr.message}`);

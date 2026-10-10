@@ -15,7 +15,11 @@ import {
   removeBinding,
   saveConfigV2,
 } from "../../core/bindings";
-import { saveCredential, deleteCredential } from "../../platform/credential-store";
+import {
+  saveCredential,
+  deleteCredential,
+  type ProjectCredential,
+} from "../../platform/credential-store";
 import { retireBinding, type RetireOutcome } from "../../core/retire-binding";
 import type { Binding, CollectorConfigV2 } from "../../core/config-schema";
 import { ApiError, extractErrorCode } from "../../api/client";
@@ -85,6 +89,14 @@ function reportRetired(binding: Binding, notice: RetireOutcome, what: string): v
     logger.plain(
       `  Kept this machine's device on ${server}: ${n} connection${n === 1 ? "" : "s"} here still use${n === 1 ? "s" : ""} it.`
     );
+    // Revoking the device would have taken this connection's refresh family
+    // with it. With the device kept, the revoke is all there is.
+    if (notice.refresh && !notice.refresh.ok) {
+      logger.warn(
+        `Could not tell ${server} to revoke this connection's refresh token (${notice.refresh.reason}). ` +
+          `It was deleted here and expires on its own; an organization admin can revoke this device to end it sooner.`
+      );
+    }
     return;
   }
   if (notice.ok) {
@@ -99,10 +111,49 @@ function reportRetired(binding: Binding, notice: RetireOutcome, what: string): v
 }
 
 export interface EnrollResponse {
-  credential: string;
+  /** An older server's single 90-day credential. */
+  credential?: string;
+  /** A server that supports rotation answers `v: 2` with a pair instead. */
+  v?: number;
+  access?: string;
+  access_expires_at?: number;
+  refresh?: string;
+  refresh_expires_at?: number;
   device_id?: string;
   server?: { api_base_url?: string; app_base_url?: string; label?: string };
   project?: { id?: string; display_name?: string };
+}
+
+function unixSeconds(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined;
+}
+
+/**
+ * What to store from an enroll reply. We ask for a pair (`v: 2`); an older
+ * server ignores the key it does not know and answers with one `credential`,
+ * which is stored as before and exchanged by the hooks once that server
+ * supports rotation. Decided by the reply's shape — the server's version is
+ * never guessed.
+ */
+export function credentialFromEnrollment(
+  result: EnrollResponse | null | undefined
+): ProjectCredential | string | null {
+  const access = typeof result?.access === "string" ? result.access.trim() : "";
+  const refresh = typeof result?.refresh === "string" ? result.refresh.trim() : "";
+  if (access && refresh) {
+    return {
+      v: 2,
+      access,
+      access_expires_at:
+        unixSeconds(result?.access_expires_at) ?? unixSeconds(decodeJwtClaims(access)?.exp),
+      refresh,
+      refresh_expires_at: unixSeconds(result?.refresh_expires_at),
+    };
+  }
+  const credential = typeof result?.credential === "string" ? result.credential.trim() : "";
+  return credential || null;
 }
 
 async function enroll(
@@ -121,6 +172,7 @@ async function enroll(
       device_id: deviceId,
       collector_version: COLLECTOR_VERSION,
       os: detectOS(),
+      v: 2,
     }),
     signal: AbortSignal.timeout(30_000),
   });
@@ -255,7 +307,8 @@ export async function connectCommand(
   }
   const { result, deviceId, revokedDeviceId } = enrollment;
 
-  if (!result || !result.credential) {
+  const credential = credentialFromEnrollment(result);
+  if (!credential) {
     logger.error("The server did not return a credential. Nothing was changed.");
     process.exit(1);
   }
@@ -265,7 +318,7 @@ export async function connectCommand(
   // Credential first, binding last: an interrupted connect then leaves an
   // unused credential file (harmless, and reported by `agentboard doctor`)
   // rather than a binding pointing at a credential that does not exist.
-  saveCredential(credentialRef, result.credential);
+  saveCredential(credentialRef, credential);
 
   let replaced: Binding | undefined;
   let remaining: Binding[] = [];

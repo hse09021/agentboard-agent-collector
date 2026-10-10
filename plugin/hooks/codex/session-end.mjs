@@ -33,8 +33,7 @@ import {
   releaseSessionLock,
 } from '../lib/config.mjs';
 import { splitSessionDelta } from '../lib/daily-split.mjs';
-import { uploadEvents } from '../lib/transport.mjs';
-import { resolveUploadContextWithRefresh } from '../lib/upload-context.mjs';
+import { resolveUploadContextWithRefresh, uploadWithContext } from '../lib/upload-context.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
 import { readStdin } from '../lib/read-stdin.mjs';
 import { recordAgentHomesFromEnv } from '../lib/agent-homes.mjs';
@@ -81,7 +80,7 @@ async function main() {
     process.stderr.write(`agentboard-codex-sessionend: ${ctx.reason}\n`);
     process.exit(0);
   }
-  const { apiBaseUrl, deviceId, token, route } = ctx;
+  const { deviceId, route } = ctx;
 
   // 1. Force a rate-limit snapshot (throttle bypassed for the end-of-session
   //    resting value). Reads codex app-server's rate limits — a metadata RPC,
@@ -151,7 +150,7 @@ async function main() {
   }
 
   try {
-    const verdict = await uploadEvents(apiBaseUrl, token, deviceId, events);
+    const verdict = await uploadWithContext(ctx, events);
 
     // A 2xx does not mean every event landed — the server reports per-event
     // rejections inside the body. Advancing the ledger past something the

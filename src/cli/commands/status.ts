@@ -4,7 +4,7 @@ import * as os from "os";
 import { loadConfig, getConfigDir, getHookSentPath } from "../../core/config";
 import {
   hasToken,
-  loadCredential,
+  loadProjectCredential,
   loadToken,
   loadTokenBundle,
 } from "../../platform/credential-store";
@@ -159,7 +159,7 @@ export async function statusCommand(): Promise<void> {
   // ── Connected projects ───────────────────────────────────────────────────
   // Hooks renew these credentials in the background. A refusal or an expiry is
   // otherwise invisible: the organization dashboard just stops growing.
-  const connections = reportProjectCredentials(loadConfigV2().bindings, loadCredential);
+  const connections = reportProjectCredentials(loadConfigV2().bindings, loadProjectCredential);
   if (connections.length > 0) {
     logger.plain(chalk.bold("Connected projects"));
     logger.plain("─".repeat(40));

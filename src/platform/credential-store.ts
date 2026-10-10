@@ -2,15 +2,15 @@ import * as fs from "fs";
 import * as path from "path";
 import { getTokenPath, getConfigDir, ensureConfigDir } from "../core/config";
 import { decodeJwtClaims } from "../core/jwt";
-import { releaseTokenLock } from "./token-lock";
+import { releaseFileLock, releaseTokenLock } from "./token-lock";
 
 /**
  * Per-route credentials.
  *
  * The community server keeps using .token (written by `agentboard login`).
- * Every connected project gets its own file under credentials/, because the
- * enrollment credential is scoped to one project on one server — losing or
- * revoking one must not touch the others.
+ * Every connected project gets its own file under credentials/, because its
+ * credential is scoped to one project on one server — losing or revoking one
+ * must not touch the others, and none of them may ever reach another server.
  *
  * Separate files rather than one JSON blob: deleteCredential() overwrites the
  * bytes before unlinking, and that is impossible to do for a single entry
@@ -39,13 +39,123 @@ export function getCredentialPath(ref: string): string {
   return path.join(getCredentialsDir(), `${ref}.cred`);
 }
 
-export function saveCredential(ref: string, credential: string): void {
-  const target = getCredentialPath(ref);
-  fs.mkdirSync(getCredentialsDir(), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(target, credential, { encoding: "utf-8", mode: 0o600 });
+/**
+ * The lock hooks take while rotating this connection's credential. One per
+ * connection: different connections belong to different refresh families, so
+ * they never need to wait for each other.
+ */
+export function getCredentialLockPath(ref: string): string {
+  assertValidCredentialRef(ref);
+  return path.join(getCredentialsDir(), `${ref}.lock`);
 }
 
-export function loadCredential(ref: string): string | null {
+/**
+ * A connected project's credential.
+ *
+ * A server that supports rotation issues an access/refresh pair (`v: 2`),
+ * stored as JSON. Older servers, and connections made before rotation, hold a
+ * single 90-day JWT; it is promoted in memory to `refresh: null`, so callers
+ * handle one shape. See "Project credentials" in docs/token-refresh.md.
+ *
+ * Deliberately not TokenBundle. That is the default route's `.token`, issued by
+ * a different server, and one type for both would make it easy to hand one
+ * server's token to the other's refresh code.
+ */
+export interface ProjectCredential {
+  /** 2 for a pair; 1 for a legacy single JWT promoted in memory. */
+  v: number;
+  /** The bearer for uploads: the access token, or the legacy credential. */
+  access: string;
+  /** Unix seconds. */
+  access_expires_at?: number;
+  /** Null for a legacy credential, which renews through /v1/collector/renew. */
+  refresh: string | null;
+  /** Unix seconds. Absent when the server does not report it. */
+  refresh_expires_at?: number;
+}
+
+export const PROJECT_CREDENTIAL_FORMAT_VERSION = 2;
+
+/**
+ * Parses either storage format, with the same discriminator as
+ * parseTokenFile(): a leading `{` is the JSON pair, anything else a legacy
+ * JWT. A pair without both tokens is unusable rather than legacy — an access
+ * token alone dies within the hour and cannot be renewed — so it reads as no
+ * credential, which tells the user to connect again.
+ */
+export function parseProjectCredentialFile(contents: string): ProjectCredential | null {
+  const trimmed = contents.trim();
+  if (!trimmed) return null;
+
+  if (!trimmed.startsWith("{")) {
+    return {
+      v: 1,
+      access: trimmed,
+      access_expires_at: coerceUnixSeconds(decodeJwtClaims(trimmed)?.exp),
+      refresh: null,
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const obj = parsed as Record<string, unknown>;
+  if (typeof obj.access !== "string" || !obj.access) return null;
+  if (typeof obj.refresh !== "string" || !obj.refresh) return null;
+
+  return {
+    v: typeof obj.v === "number" ? obj.v : PROJECT_CREDENTIAL_FORMAT_VERSION,
+    access: obj.access,
+    access_expires_at:
+      coerceUnixSeconds(obj.access_expires_at) ?? coerceUnixSeconds(decodeJwtClaims(obj.access)?.exp),
+    refresh: obj.refresh,
+    refresh_expires_at: coerceUnixSeconds(obj.refresh_expires_at),
+  };
+}
+
+/**
+ * A legacy credential is written back as the bare JWT it was, so a collector
+ * that predates the pair format can still read it.
+ */
+export function serializeProjectCredential(credential: ProjectCredential): string {
+  if (!credential.refresh) return credential.access;
+  return JSON.stringify(
+    {
+      v: credential.v ?? PROJECT_CREDENTIAL_FORMAT_VERSION,
+      access: credential.access,
+      ...(credential.access_expires_at !== undefined
+        ? { access_expires_at: credential.access_expires_at }
+        : {}),
+      refresh: credential.refresh,
+      ...(credential.refresh_expires_at !== undefined
+        ? { refresh_expires_at: credential.refresh_expires_at }
+        : {}),
+    },
+    null,
+    2
+  );
+}
+
+/**
+ * Writes atomically (temp file + rename), mode 0600. Hooks read this file while
+ * other hooks rotate it, and a truncated read would look like a missing
+ * credential and skip the upload.
+ *
+ * Accepts a bare legacy credential (what an older server's enroll returns) or
+ * a pair.
+ */
+export function saveCredential(ref: string, credential: string | ProjectCredential): void {
+  const target = getCredentialPath(ref);
+  fs.mkdirSync(getCredentialsDir(), { recursive: true, mode: 0o700 });
+  const contents = typeof credential === "string" ? credential : serializeProjectCredential(credential);
+  writeSecretAtomic(target, contents);
+}
+
+export function loadProjectCredential(ref: string): ProjectCredential | null {
   let target: string;
   try {
     target = getCredentialPath(ref);
@@ -54,10 +164,15 @@ export function loadCredential(ref: string): string | null {
   }
   if (!fs.existsSync(target)) return null;
   try {
-    return fs.readFileSync(target, "utf-8").trim() || null;
+    return parseProjectCredentialFile(fs.readFileSync(target, "utf-8"));
   } catch {
     return null;
   }
+}
+
+/** The bearer this connection uploads with, in either storage format. */
+export function loadCredential(ref: string): string | null {
+  return loadProjectCredential(ref)?.access ?? null;
 }
 
 /** Overwrites the bytes before unlinking, same as deleteToken(). */
@@ -68,6 +183,9 @@ export function deleteCredential(ref: string): void {
   } catch {
     return;
   }
+  // Like deleteToken(): a lock left by a killed hook would otherwise outlive
+  // the connection it guarded.
+  releaseFileLock(getCredentialLockPath(ref));
   if (!fs.existsSync(target)) return;
   try {
     const len = fs.statSync(target).size;
@@ -195,13 +313,17 @@ export function serializeTokenBundle(bundle: TokenBundle): string {
  */
 export function saveTokenBundle(bundle: TokenBundle): void {
   ensureConfigDir();
-  const target = getTokenPath();
+  writeSecretAtomic(getTokenPath(), serializeTokenBundle(bundle) + "\n");
+}
+
+/**
+ * Sibling temp file + rename, mode 0600. The caller names the target: `.token`
+ * and each `.cred` belong to different servers and never share a default.
+ */
+function writeSecretAtomic(target: string, contents: string): void {
   const tmpPath = `${target}.${process.pid}.tmp`;
   try {
-    fs.writeFileSync(tmpPath, serializeTokenBundle(bundle) + "\n", {
-      encoding: "utf-8",
-      mode: 0o600,
-    });
+    fs.writeFileSync(tmpPath, contents, { encoding: "utf-8", mode: 0o600 });
     // renameSync preserves the temp file's mode, so 0600 carries over. An
     // existing target's mode does not survive, which is why the temp file is
     // created with the mode we want rather than chmod'ed afterwards.

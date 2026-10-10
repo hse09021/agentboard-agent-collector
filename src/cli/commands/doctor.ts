@@ -4,7 +4,7 @@ import * as os from "os";
 import { loadConfig, getConfigDir, getHookSentPath } from "../../core/config";
 import {
   hasToken,
-  loadCredential,
+  loadProjectCredential,
   loadToken,
   loadTokenBundle,
   listCredentialRefs,
@@ -323,7 +323,7 @@ async function runChecks(): Promise<CheckResult[]> {
   // that went unused past the expiry, and a renewal the server refused (revoked
   // device, left the organization, archived project) — both of which otherwise
   // end collection without a single visible error.
-  for (const row of reportProjectCredentials(v2.bindings, loadCredential)) {
+  for (const row of reportProjectCredentials(v2.bindings, loadProjectCredential)) {
     results.push({ label: `Project ${row.label}`, ok: row.ok, message: row.message });
   }
 

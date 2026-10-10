@@ -26,8 +26,7 @@ import {
 } from '../lib/config.mjs';
 import { isRevokedDeviceError, revokedDeviceMessage } from '../lib/revoked.mjs';
 import { splitSessionDelta } from '../lib/daily-split.mjs';
-import { uploadEvents } from '../lib/transport.mjs';
-import { resolveUploadContextWithRefresh } from '../lib/upload-context.mjs';
+import { resolveUploadContextWithRefresh, uploadWithContext } from '../lib/upload-context.mjs';
 import { assertNoForbiddenFields } from '../lib/forbidden-data-guard.mjs';
 import { readStdin } from '../lib/read-stdin.mjs';
 
@@ -73,7 +72,7 @@ async function main() {
     process.stderr.write(`agentboard-codex-subagent: ${ctx.reason}\n`);
     process.exit(0);
   }
-  const { apiBaseUrl, deviceId, token, route } = ctx;
+  const { deviceId, route } = ctx;
 
   // The child rollout may still be flushing when the hook fires — retry like
   // notify.mjs does for the parent session file.
@@ -113,7 +112,7 @@ async function main() {
   }
 
   try {
-    const verdict = await uploadEvents(apiBaseUrl, token, deviceId, events);
+    const verdict = await uploadWithContext(ctx, events);
 
     // A 2xx does not mean every event landed — the server reports per-event
     // rejections inside the body. Advancing the ledger past something the

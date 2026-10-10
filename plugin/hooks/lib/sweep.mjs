@@ -60,7 +60,7 @@ import {
 import { loadScanCache, saveScanCache, isUnchanged, rememberScan, getCacheEntry } from './scan-cache.mjs';
 import { splitSessionDelta } from './daily-split.mjs';
 import { uploadEvents } from './transport.mjs';
-import { resolveUploadContextWithRefresh } from './upload-context.mjs';
+import { resolveUploadContextWithRefresh, uploadWithContext } from './upload-context.mjs';
 import { assertNoForbiddenFields } from './forbidden-data-guard.mjs';
 import { parseClaudeSession, convertLineCountedWatermark } from '../claude/parse-claude.mjs';
 import { findCodexSessionFiles, parseCodexFiles } from '../codex/parse-codex.mjs';
@@ -427,14 +427,14 @@ export async function sweepOneSession(candidate, ctx = {}) {
     if (!uploadCtx.ok) {
       return { status: /credential/.test(uploadCtx.reason) ? 'nocred' : 'noroute', sessionId };
     }
-    const { apiBaseUrl, deviceId, token, route } = uploadCtx;
+    const { deviceId, route } = uploadCtx;
 
     const events = pieces.map((piece) =>
       buildUsageEvent(source, deviceId, sessionId, parsed.model, piece, alreadySent)
     );
     for (const event of events) assertNoForbiddenFields(event);
 
-    const verdict = await uploader(apiBaseUrl, token, deviceId, events);
+    const verdict = await uploadWithContext(uploadCtx, events, () => {}, uploader);
     if (verdict && !verdict.canAdvanceLedger) {
       return { status: 'error', sessionId, error: 'server rejected retriably' };
     }

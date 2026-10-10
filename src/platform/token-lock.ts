@@ -11,11 +11,14 @@
  * This is the first of two defences; the second is the server's grace window
  * for a re-submission within 30s of `used_at`. See docs/token-refresh.md.
  *
+ * The same lock guards each connected project's credential, at its own path
+ * (credentials/<ref>.lock): rotating those has the same hazard.
+ *
  * Mirror of plugin/hooks/lib/token-lock.mjs — keep the two in sync.
  */
 
 import * as fs from "fs";
-import { getConfigDir, ensureConfigDir } from "../core/config";
+import { getConfigDir } from "../core/config";
 import * as path from "path";
 
 /** A holder older than this is assumed dead and taken over. */
@@ -24,6 +27,7 @@ export const LOCK_STALE_MS = 30_000;
 const ACQUIRE_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 50;
 
+/** The default route's lock, guarding `.token`. */
 export function getTokenLockPath(): string {
   return path.join(getConfigDir(), ".token.lock");
 }
@@ -59,22 +63,26 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Waits for the lock, taking over a stale one.
+ * Waits for the lock at `lockPath`, taking over a stale one.
+ *
+ * The caller always names the lock. Each refresh family has its own — `.token`
+ * for the default route, one per connected project — and a default here would
+ * make it easy to guard one server's token with another's lock.
  *
  * Returns false on timeout. A caller that fails to acquire must NOT refresh
  * anyway — it should re-read the token file, because whoever holds the lock is
  * almost certainly writing a fresh bundle right now.
  */
-export async function acquireTokenLock(
+export async function acquireFileLock(
+  lockPath: string,
   timeoutMs = ACQUIRE_TIMEOUT_MS
 ): Promise<boolean> {
   try {
-    ensureConfigDir();
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
   } catch {
     return false;
   }
 
-  const lockPath = getTokenLockPath();
   const deadline = Date.now() + timeoutMs;
 
   for (;;) {
@@ -97,29 +105,46 @@ export async function acquireTokenLock(
   }
 }
 
-export function releaseTokenLock(): void {
+export function releaseFileLock(lockPath: string): void {
   try {
-    fs.unlinkSync(getTokenLockPath());
+    fs.unlinkSync(lockPath);
   } catch {
     /* already released or stolen */
   }
 }
 
 /**
- * Runs `fn` under the lock, releasing in `finally`.
+ * Runs `fn` under the lock at `lockPath`, releasing in `finally`.
  *
  * `onBusy` runs instead when the lock could not be taken — that is the
  * "re-read what the winner wrote" path, not an error.
  */
-export async function withTokenLock<T>(
+export async function withFileLock<T>(
+  lockPath: string,
   fn: () => Promise<T>,
   onBusy: () => Promise<T> | T,
   opts: { timeoutMs?: number } = {}
 ): Promise<T> {
-  if (!(await acquireTokenLock(opts.timeoutMs))) return onBusy();
+  if (!(await acquireFileLock(lockPath, opts.timeoutMs))) return onBusy();
   try {
     return await fn();
   } finally {
-    releaseTokenLock();
+    releaseFileLock(lockPath);
   }
+}
+
+export function acquireTokenLock(timeoutMs = ACQUIRE_TIMEOUT_MS): Promise<boolean> {
+  return acquireFileLock(getTokenLockPath(), timeoutMs);
+}
+
+export function releaseTokenLock(): void {
+  releaseFileLock(getTokenLockPath());
+}
+
+export function withTokenLock<T>(
+  fn: () => Promise<T>,
+  onBusy: () => Promise<T> | T,
+  opts: { timeoutMs?: number } = {}
+): Promise<T> {
+  return withFileLock(getTokenLockPath(), fn, onBusy, opts);
 }

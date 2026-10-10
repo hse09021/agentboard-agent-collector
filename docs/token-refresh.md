@@ -37,11 +37,11 @@ login writes the new format.
 this file concurrently; a truncated read must be impossible. Mode `0600` must
 survive every write.
 
-**Scope.** Refresh applies to `.token` (the default route) only. Per-project
-credentials under `credentials/<ref>.cred` are separate enrollment credentials,
-are not part of a refresh family, and must never be sent to the refresh
-endpoint. They are renewed by a different, simpler mechanism — see
-"Project credentials" below.
+**Scope.** Everything up to "Project credentials" is about `.token`, the
+default route. Each connected project's `credentials/<ref>.cred` rotates by the
+same rules but through its own endpoints, files and lock, because it is a
+different server's token — see "Project credentials" and "Keeping the routes
+apart" below.
 
 ## Refresh timing
 
@@ -169,70 +169,196 @@ concurrent hooks are reading.
 
 ## Project credentials
 
-`agentboard connect` stores a device credential per connected directory in
-`credentials/<ref>.cred` (a bare JWT, mode `0600`). The organization server
-issues it for 90 days by default (`PROJECT_CREDENTIAL_TTL_SECONDS`). Until
-0.10.0 nothing renewed it, so every connection went dark 90 days after
-`connect`, with a 401 no hook reported.
+`agentboard connect` stores a credential per connected directory in
+`credentials/<ref>.cred`, mode `0600`, issued by that project's organization
+server. Until 0.10.0 nothing renewed it, so every connection went dark 90 days
+after `connect`. 0.10.0 renewed the single 90-day credential; this section
+adds access/refresh rotation, so a leaked file is good for an hour, and a
+refresh token used twice is caught by the server.
 
-**Who renews.** Hooks only. They are the only code that uploads with these
-credentials, and renewing on upload means a machine that is actually used never
-expires, while one left unused for the whole lifetime does — no indefinite
-bearer. The CLI never calls the server for this; `status` and `doctor` only
-report.
+**Who rotates.** Hooks only. They are the only code that uploads with these
+credentials, and rotating on upload means a machine that is actually used
+never expires, while one left unused for the whole lifetime does — no
+indefinite bearer. The CLI never refreshes these; `status` and `doctor` only
+report, and `disconnect` only revokes.
 
-**When.** Before an upload, when `now >= exp - threshold`:
+**Upgrade order is not fixed.** Self-hosted servers upgrade on the customer's
+schedule, so a new collector must keep working against an old server. Every
+decision below is made from the **shape of the server's reply**, never from a
+guess at its version.
+
+### Storage format
+
+```jsonc
+// credentials/<ref>.cred  (mode 0600)
+{
+  "v": 2,
+  "access": "<jwt>",
+  "access_expires_at": 1791003600,  // unix seconds
+  "refresh": "<opaque>",
+  "refresh_expires_at": 1798776000  // unix seconds, optional
+}
+```
+
+The same discriminator as `.token`: a file whose first non-whitespace character
+is `{` is the pair; anything else is a **legacy** bare 90-day JWT, promoted in
+memory to `refresh: null`. A pair missing either token, or unparseable JSON,
+is not a credential (it reads as missing, and `status` says to connect again).
+A legacy credential is written back as the bare JWT it was.
+
+Writes are atomic (sibling temp file + `rename`), in the CLI (`connect`) and
+the hooks alike. The reader and writer are separate from `.token`'s on both
+sides, even though the shapes are close — see "Keeping the routes apart".
+
+### Protocol
+
+| Path | Request | Success |
+|---|---|---|
+| `POST /v1/collector/enroll` | ticket as Bearer; body adds `"v": 2` | the pair below. Without `v` (or from an old server), `{ "credential" }` as before |
+| `POST /v1/collector/refresh` | **no** auth header; `{"refresh_token", "device_id"}` | the pair |
+| `POST /v1/collector/renew` | legacy credential as Bearer; body `{"device_id", "v": 2}` | the pair, and the credential sent is revoked at once. An old server ignores `v` and answers `{ "credential" }` |
+| `POST /v1/collector/revoke` | `{"refresh_token"}` | always 204; revokes that refresh token's family |
+| `POST /v1/collector/disconnect` | unchanged | unchanged; also revokes the device's refresh families |
+
+The pair reply is `{"v": 2, "access", "access_expires_at", "refresh",
+"refresh_expires_at", "device_id", "server", "project"}`. A pair's access token
+carries `"pair": true`, and `renew` refuses it (400 `use_refresh`). That does
+not touch the collector: a pair never calls `renew`, and whether a connection is
+legacy is decided by the storage format, not by that claim.
+
+### Rotation timing (pairs)
+
+Same rule as `.token`: refresh before an upload when
+`now >= access_expires_at - min(AGENTBOARD_REFRESH_THRESHOLD_SECONDS (300), ttl/3)`.
+To verify rotation end to end, set the server's access TTL to 60s and the
+threshold to 10s.
+
+- An access token that has already expired is still refreshed — what has to
+  be alive is the refresh token. A refresh token past `refresh_expires_at` is
+  not sent; `status` says to connect again.
+- A 401 on upload triggers **one** forced refresh and **one** retry. Never loop.
+
+### Rotation procedure (pairs)
+
+1. Take the connection's lock, `credentials/<ref>.lock` (same mechanics as
+   `.token.lock`). One lock per connection: different connections are
+   different families and never wait for each other. If the lock cannot be
+   taken, do not refresh — re-read the file and use what the holder wrote.
+2. **Re-read the file inside the lock.** If its refresh token changed, someone
+   else rotated; use theirs.
+3. `POST /v1/collector/refresh` to **the route's own** `api_base_url`.
+4. Write the new pair atomically, inside the lock, and only if the file still
+   holds the refresh token that was sent. If the file is gone, the connection
+   was removed mid-flight; recreating it would leave a live credential with no
+   connection.
+
+Without the lock, the hazard is the same as for `.token`:
 
 ```
-threshold = min(AGENTBOARD_PROJECT_RENEW_THRESHOLD_SECONDS (default 30 days), floor(ttl / 3))
+A Claude Code session and a Codex session in the same directory end together
+hook 1: submits refresh "AAA" → success, AAA spent
+hook 2: submits refresh "AAA" → outside the 30s grace window → reuse → family revoked
 ```
 
-`ttl = exp - iat` from the credential's own claims. The cap is the same guard as
-for access tokens: verifying renewal means shortening the server TTL, and an
-uncapped 30-day window would renew on every upload.
+| Reply | Handling |
+|---|---|
+| 2xx | store as above |
+| 401 `invalid_refresh` (missing, expired, revoked, reused, another device's), 403 `not_a_member`, 403 `revoked_device`, 404 `project_not_found`, 404 `device_not_found` | this refresh token is finished. Record it in `project-renewal.json` with a fingerprint of the token, and **never send that token again** — a spent refresh token sent twice only repeats the reuse detection. Keep using the access token until it expires. `status` and `doctor` say to connect again |
+| 429 (body `code: "rate_limited"`), 5xx, 400, network, timeout | transient. Keep the current access token and try again on the next upload. The server counts its rate limit per client IP, so devices behind one address can still see 429 together |
 
-- An already expired credential is **not** sent: the server only renews a
-  credential that is still valid, so the request could only fail. The CLI tells
-  the user to connect again.
-- No `exp` claim: do not renew.
+A rotation problem **never blocks an upload.**
 
-**Procedure.**
+### Legacy credentials
 
-1. `POST {api}/v1/collector/renew`, `Authorization: Bearer <credential>`,
-   body `{"device_id": "<binding device id>"}`.
-2. **2xx** — `{"credential": "<jwt>", ...}`. The new credential must decode and
-   carry a future `exp`, otherwise treat the reply as transient.
-3. **Compare before writing.** Re-read the `.cred` file. Write the new
-   credential (temp file + `rename`) only if the file still holds the exact
-   credential that was renewed:
-   - another hook renewed first → keep theirs; both are valid, and the server
-     does not burn families here, so no lock is needed;
-   - the file is gone → the connection was removed (`disconnect`) or replaced
-     mid-flight; recreating it would leave a live credential with no binding.
-4. **400 / 401 / 403 / 404** — refused (`revoked_device`, `not_a_member`,
-   `project_not_found`, `device_not_found`, `invalid_credential`, …). Keep the
-   current credential — it still works until it expires — and record the
-   refusal in `project-renewal.json` (below).
-5. **5xx / 429 / network / timeout** — transient. Keep the current credential
-   and try again on the next upload.
+A connection made before rotation, or against a server without it, holds a
+legacy credential. It must move to a pair **without the user doing anything**:
 
-A renewal problem **never blocks an upload.**
+- On the next upload — not 30 days before expiry — the hook calls `renew` with
+  `"v": 2`, under the connection's lock, re-reading the file first.
+- **A pair comes back:** the server has already revoked the credential that
+  was sent, so the pair must be kept. Write it atomically inside the lock. If
+  the write fails, the connection is lost: record `save_failed` (with a
+  fingerprint of the revoked credential, so it is never sent again), use the
+  new access token for this upload, and let `status` tell the user to connect
+  again.
+- **A `credential` comes back:** an old server, which hands out a fresh 90-day
+  credential on every `renew`. Store it the same way (inside the lock, only if
+  the file still holds the credential that was sent) and record the attempt in
+  `project-renewal.json`. Ask again **at most once a
+  day** per connection, so a server upgrade is picked up within a day without
+  minting a credential per session. The old renewal window still applies on
+  top: within `min(AGENTBOARD_PROJECT_RENEW_THRESHOLD_SECONDS (30 days), ttl/3)`
+  of expiry the hook renews on every upload, exactly as before. That threshold
+  applies to legacy credentials only.
+- **Refused (400 / 401 / 403 / 404):** keep the credential, record the
+  refusal and the attempt.
+- **5xx / 429 / network / timeout:** transient; no attempt is recorded, so the
+  next upload asks again.
+- An already expired legacy credential is **not** sent: the server only renews
+  a credential that is still valid. After a 401 a legacy credential is not
+  sent either — `renew` refuses it for the same reason the upload did.
 
-**Surfacing failure.** `~/.agentboard/project-renewal.json`:
+### Recording
+
+`~/.agentboard/project-renewal.json`, written atomically:
 
 ```jsonc
 {
   "v": 1,
   "failures": {
-    "<credential ref>": { "at": "<iso>", "status": 403, "code": "revoked_device" }
+    "<ref>": { "at": "<iso>", "status": 401, "code": "invalid_refresh", "token_fp": "<16 hex>" }
+  },
+  "upgrades": {
+    "<ref>": { "at": "<iso>", "outcome": "legacy" }  // or "refused"
   }
 }
 ```
 
-Rewritten only when a ref's status or code changes (the same churn rule as
-`auth-failure.json`), and the ref's entry is removed after a successful renewal.
-`status` and `doctor` show each connection's expiry and any refusal, and ignore
-entries whose ref no longer belongs to a connection.
+- `status` is absent for a failure that happened locally (`code: "save_failed"`).
+- `token_fp` is the first 16 hex digits of the SHA-256 of the token the failure
+  used up. The token itself is never stored here.
+- An entry is rewritten only when it changes (the same churn rule as
+  `auth-failure.json`), and removed after a successful rotation or exchange.
+  The file is deleted when it holds nothing.
+- `status` and `doctor` show, per connection: a pair's refresh expiry and any
+  failure; a legacy credential's expiry, and "switches to rotating credentials
+  on the next upload" until its server has answered the old way. Entries
+  whose ref no longer belongs to a connection are ignored.
+
+### Disconnect
+
+`disconnect`, and `connect` replacing a connection, retire it (best-effort,
+local deletion always proceeds):
+
+1. Tell the server to revoke the device (`/v1/collector/disconnect`) only when
+   no other connection on this machine uses the same device id. The stored
+   access token is the Bearer even if it has expired; the server accepts it.
+2. If the connection holds a refresh token, **always** `POST /v1/collector/revoke`
+   with it — after step 1, so the device notice is not sent with an access token
+   whose family was just revoked.
+3. Delete the credential (overwritten, then unlinked) and its lock file.
+
+## Keeping the routes apart
+
+`.token` belongs to the default server (agentboard.cloud, or whatever `login`
+targeted). Each `.cred` belongs to the organization server its directory is
+connected to. A token sent to the other server is rejected — the signature does
+not match — but by then it has been **shown to that server's operator**.
+Rejection is a backstop; preventing it is the collector's job.
+
+- Project rotation never reads or writes `.token` or `.token.lock`. Default
+  route rotation never touches a `.cred` or `credentials/<ref>.lock`.
+- Every refresh, renew or revoke goes only to the server that issued the token:
+  the route's `api_base_url`.
+- `ensureFreshToken()` (both runtimes) and `ApiClient`'s `autoRefresh` are for
+  the default route only. Project rotation lives in
+  `ensureFreshProjectCredential()` (`plugin/hooks/lib/project-credential.mjs`).
+- The read/write functions for the two stores stay separate. Where a helper is
+  shared (the lock, the atomic writer), the caller passes the path; there is no
+  default that could fall back to `.token`.
+- The hooks choose route and credential together in one place
+  (`plugin/hooks/lib/upload-context.mjs`), which the Claude Code worker, the
+  Codex hooks and the sweep all use.
 
 ## Login / logout
 

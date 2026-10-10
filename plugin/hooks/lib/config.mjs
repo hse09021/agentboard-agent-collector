@@ -150,19 +150,13 @@ function normalizeServerRef(server) {
 }
 
 /**
- * Credential for a route. The default route keeps using .token (written by
- * `agentboard login`); connected projects each have their own file.
+ * The bearer for a route. The default route keeps using .token (written by
+ * `agentboard login`); connected projects each have their own file, issued by
+ * their own server.
  */
 export function loadRouteCredential(credentialRef) {
   if (!credentialRef) return loadToken();
-  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(credentialRef)) return null;
-  const credPath = join(CONFIG_DIR, 'credentials', credentialRef + '.cred');
-  if (!existsSync(credPath)) return null;
-  try {
-    return readFileSync(credPath, 'utf-8').trim() || null;
-  } catch {
-    return null;
-  }
+  return loadProjectCredential(credentialRef)?.access ?? null;
 }
 
 export function getApiBaseUrl(config) {
@@ -300,6 +294,121 @@ export function saveTokenBundle(bundle) {
  */
 export function loadToken() {
   return loadTokenBundle()?.access ?? null;
+}
+
+// ─── Project credentials (credentials/<ref>.cred) ─────────────────────────────
+//
+// Mirror of the ProjectCredential half of src/platform/credential-store.ts.
+// Separate from the `.token` functions above on purpose, even though the shapes
+// are close: a `.cred` belongs to the organization server the directory is
+// connected to, `.token` to the default server, and sharing a reader or writer
+// would make it easy to send one server's token to the other.
+
+const CREDENTIAL_REF_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const PROJECT_CREDENTIAL_FORMAT_VERSION = 2;
+
+/** Null for a ref that is not a valid filename. */
+export function projectCredentialPath(ref) {
+  return CREDENTIAL_REF_PATTERN.test(ref ?? '') ? join(CONFIG_DIR, 'credentials', `${ref}.cred`) : null;
+}
+
+/** The lock held while rotating this connection's credential. */
+export function projectCredentialLockPath(ref) {
+  return CREDENTIAL_REF_PATTERN.test(ref ?? '') ? join(CONFIG_DIR, 'credentials', `${ref}.lock`) : null;
+}
+
+/**
+ * Parses either storage format: a leading `{` is the access/refresh pair, and
+ * anything else a legacy 90-day JWT, promoted to `refresh: null`. A pair
+ * missing either token is unusable rather than legacy, so it reads as null.
+ *
+ * @param {string} contents
+ * @returns {{v:number, access:string, access_expires_at?:number,
+ *            refresh:string|null, refresh_expires_at?:number}|null}
+ */
+export function parseProjectCredentialFile(contents) {
+  const trimmed = (contents ?? '').trim();
+  if (!trimmed) return null;
+  if (!trimmed.startsWith('{')) {
+    return {
+      v: 1,
+      access: trimmed,
+      access_expires_at: coerceUnixSeconds(decodeJwtClaims(trimmed)?.exp),
+      refresh: null,
+    };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  if (typeof parsed.access !== 'string' || !parsed.access) return null;
+  if (typeof parsed.refresh !== 'string' || !parsed.refresh) return null;
+
+  return {
+    v: typeof parsed.v === 'number' ? parsed.v : PROJECT_CREDENTIAL_FORMAT_VERSION,
+    access: parsed.access,
+    access_expires_at:
+      coerceUnixSeconds(parsed.access_expires_at) ?? coerceUnixSeconds(decodeJwtClaims(parsed.access)?.exp),
+    refresh: parsed.refresh,
+    refresh_expires_at: coerceUnixSeconds(parsed.refresh_expires_at),
+  };
+}
+
+/** A legacy credential is written back as the bare JWT it was. */
+export function serializeProjectCredential(credential) {
+  if (!credential.refresh) return credential.access;
+  return JSON.stringify(
+    {
+      v: credential.v ?? PROJECT_CREDENTIAL_FORMAT_VERSION,
+      access: credential.access,
+      ...(credential.access_expires_at !== undefined
+        ? { access_expires_at: credential.access_expires_at }
+        : {}),
+      refresh: credential.refresh,
+      ...(credential.refresh_expires_at !== undefined
+        ? { refresh_expires_at: credential.refresh_expires_at }
+        : {}),
+    },
+    null,
+    2,
+  );
+}
+
+export function loadProjectCredential(ref) {
+  const path = projectCredentialPath(ref);
+  if (!path || !existsSync(path)) return null;
+  try {
+    return parseProjectCredentialFile(readFileSync(path, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Atomic write: sibling temp file + rename, mode 0600. Hooks read this file
+ * while other hooks rotate it, and a truncated read would look like a missing
+ * credential and skip the upload. Throws, so the caller can tell the user when
+ * a credential the server already replaced could not be kept.
+ */
+export function saveProjectCredential(ref, credential) {
+  const path = projectCredentialPath(ref);
+  if (!path) throw new Error(`invalid credential ref: ${JSON.stringify(ref)}`);
+  const tmpPath = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmpPath, serializeProjectCredential(credential), { encoding: 'utf-8', mode: 0o600 });
+    renameSync(tmpPath, path);
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* best-effort */
+    }
+    throw err;
+  }
 }
 
 // ─── Session-sent tracking ────────────────────────────────────────────────────
