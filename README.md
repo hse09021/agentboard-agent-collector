@@ -126,7 +126,7 @@ agentboard status
 agentboard doctor
 ```
 
-설정 디렉터리 접근성, API 연결 상태, 훅 등록 유효성 등 전체 환경을 점검합니다.
+설정 디렉터리 접근성, API 연결 상태, 훅 등록 유효성 등 전체 환경을 점검합니다. 감지한 Claude 요금제와 그 출처도 보여 줍니다.
 
 ### 5. 훅 해제
 
@@ -198,6 +198,13 @@ access는 한 시간짜리이고 만료 직전에 업로드하면서 자동으�
 `/usage` 결과(요금제명, 5시간·주간 잔량)는 **그 세션과 같은 서버로** 갑니다.
 한도는 계정 단위라 다른 곳에서 쓴 양도 반영됩니다. 제외하려면
 `config.json`의 `snapshot_target`을 `"default"`(커뮤니티만) 또는 `"off"`로 둡니다.
+
+Claude Code의 `/usage` 출력에는 요금제 이름이 없어서, 요금제는 Claude Code가 로컬에 둔 계정 정보에서 읽습니다.
+먼저 Claude Code를 켤 때마다 갱신되는 `.claude.json`(`CLAUDE_CONFIG_DIR`가 있으면 그 안, 없으면 `~/.claude.json`)에서
+`oauthAccount.organizationType`과 `organizationRateLimitTier` 두 필드만 꺼냅니다. 이메일·이름·조직명 같은 나머지 필드는
+보관하거나 전송하지 않습니다. 이 값이 없으면 로그인할 때 저장된 자격증명(`.credentials.json` 또는 macOS Keychain)을 씁니다.
+그래서 claude.ai에서 바꾼 요금제는 다음에 Claude Code를 켤 때부터 반영됩니다. 지금 어떤 요금제를 어디에서 읽는지는
+`agentboard doctor`의 `Claude plan` 줄에서 확인할 수 있습니다.
 
 ## 교차 에이전트 수집 (스윕)
 
