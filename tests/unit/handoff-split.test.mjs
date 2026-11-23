@@ -38,7 +38,7 @@ function session(entries) {
 
 // The single-key view of splitBucketedDelta.
 function splitHandoffDelta(parsed, alreadySent, splitAt) {
-  const { earlier, later } = splitBucketedDelta(parsed, { [KS]: alreadySent }, splitAt);
+  const { earlier, later } = splitBucketedDelta(parsed, { [KS]: alreadySent }, { splitAt });
   return {
     earlier: { pieces: earlier.pieces, watermark: earlier.watermarks[KS], sentAfter: earlier.record[KS] },
     later: { pieces: later.pieces, watermark: later.watermarks[KS] },
@@ -127,7 +127,7 @@ describe('splitBucketedDelta at a connection', () => {
     const { earlier, later } = splitBucketedDelta(
       { ...flat, startedAt: '2026-11-20T10:00:00.000Z' },
       { [KS]: turn(1_000, 100) },
-      CONNECTED
+      { splitAt: CONNECTED }
     );
     expect(earlier.pieces).toEqual([]);
     expect(sum(later.pieces)).toBe(parsed.totalTokens - 1_100);

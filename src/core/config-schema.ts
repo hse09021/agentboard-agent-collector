@@ -46,6 +46,28 @@ export type SnapshotTarget = "routed" | "default" | "off";
  */
 export type SweepMode = "registered" | "off";
 
+/**
+ * Which unconnected directories send usage to the default (community) server.
+ *
+ *   "all" — every directory not connected to an organization. The default, so
+ *     existing installs behave exactly as before.
+ *   "listed" — only directories in `tracked_dirs` (and below them), and only
+ *     what was used after each was added. Everything else is sent nowhere.
+ *
+ * Connected directories are unaffected either way: a binding always wins.
+ */
+export type DefaultScope = "all" | "listed";
+
+/** A directory whose usage goes to the default server in "listed" scope. */
+export interface TrackedDir {
+  /** Directory as the user typed it. */
+  abs_dir: string;
+  /** realpath() of abs_dir when it was added; both are matched at routing time. */
+  real_dir: string;
+  /** Usage from before this instant is never sent (#23). */
+  added_at: string;
+}
+
 export interface ServerRef {
   api_base_url: string;
   app_base_url: string;
@@ -87,6 +109,12 @@ export interface CollectorConfigV2 {
    * degradation, and the correct one.
    */
   sweep: SweepMode;
+  /**
+   * Also absent from the downgrade mirror: an older collector ignores both and
+   * behaves as "all", which is what this collector does by default too.
+   */
+  default_scope: DefaultScope;
+  tracked_dirs: TrackedDir[];
 }
 
 /** The v1 shape, for migration only. */
@@ -189,7 +217,30 @@ export function migrateV1toV2(
     bindings: [],
     snapshot_target: "routed",
     sweep: "registered",
+    default_scope: "all",
+    tracked_dirs: [],
   };
+}
+
+/**
+ * Only an explicit "listed" narrows collection. Anything else, including a
+ * missing value, is "all" — the behaviour every install had before #23.
+ */
+export function normalizeDefaultScope(value: unknown): DefaultScope {
+  return typeof value === "string" && value.trim().toLowerCase() === "listed" ? "listed" : "all";
+}
+
+/** Drops entries that could never match rather than failing the whole config. */
+export function normalizeTrackedDirs(value: unknown): TrackedDir[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (d): d is TrackedDir =>
+      typeof d === "object" &&
+      d !== null &&
+      typeof d.abs_dir === "string" &&
+      d.abs_dir.length > 0 &&
+      typeof d.added_at === "string"
+  ).map((d) => ({ abs_dir: d.abs_dir, real_dir: d.real_dir || d.abs_dir, added_at: d.added_at }));
 }
 
 function labelForUrl(url: string): string {
@@ -226,5 +277,7 @@ export function normalizeV2(raw: CollectorConfigV2): CollectorConfigV2 {
     // Anything unrecognised coerces to the documented default rather than
     // throwing: a typo in a hand-edited config must not stop collection.
     sweep: raw.sweep === "off" ? "off" : "registered",
+    default_scope: normalizeDefaultScope(raw.default_scope),
+    tracked_dirs: normalizeTrackedDirs(raw.tracked_dirs),
   };
 }

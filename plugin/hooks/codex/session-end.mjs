@@ -78,10 +78,14 @@ async function main() {
   // 1. Force a rate-limit snapshot (throttle bypassed for the end-of-session
   //    resting value). Reads codex app-server's rate limits — a metadata RPC,
   //    not a billable turn, and it does not fire codex hooks, so no recursion.
-  const usageSnapshot = await captureUsageLimitSnapshot('codex', {
-    minIntervalMs: 0,
-    route: plan.route.routeId,
-  }).catch(() => null);
+  //    Not for a session "listed" scope does not collect: it sends nothing.
+  const usageSnapshot =
+    plan.kind === 'skip'
+      ? null
+      : await captureUsageLimitSnapshot('codex', {
+          minIntervalMs: 0,
+          route: plan.route.routeId,
+        }).catch(() => null);
 
   // 2. Guarded parent-session token residue sweep, under the SAME per-session
   //    lock notify.mjs takes. A final notify still uploading this session
