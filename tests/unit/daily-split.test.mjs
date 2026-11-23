@@ -27,6 +27,7 @@ function turn(input, output, cacheCreation = 0, cacheRead = 0, cc5 = 0, cc1h = 0
     cacheCreation5mTokens: cc5,
     cacheCreation1hTokens: cc1h,
     cacheReadTokens: cacheRead,
+    cacheWriteInputTokens: 0,
     totalTokens: input + output + cacheCreation + cacheRead,
   };
 }

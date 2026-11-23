@@ -25,6 +25,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { getCodexSessionsDirs } from '../lib/agent-homes.mjs';
 import { addToDayBucket, sortDayBuckets } from '../lib/daily-split.mjs';
+import { STANDARD_SPEED, contextSizeBucket, makeBucketKey } from '../lib/usage-buckets.mjs';
 
 function toNN(v) {
   const n = typeof v === 'number' ? v : Number(v);
@@ -110,6 +111,9 @@ function parseUsageObject(usageObj) {
       usageObj.cached_tokens ??
       0
     ),
+    // OpenAI bills cache writes from GPT-6.x on. Kept apart from input: Codex
+    // does not say whether its input_tokens already include them.
+    cache_write_tokens: toNN(usageObj.cache_write_input_tokens ?? 0),
   };
 }
 
@@ -129,6 +133,9 @@ function readRollout(filePath) {
   if (lines.length === 0) return null;
 
   let model;
+  // The model in effect for the calls that follow: each turn_context names the
+  // one its turn runs on, and a thread can switch mid-way.
+  let currentModel;
   let sessionId;
   // Routing anchor. Codex's per-turn `notify` payload carries only
   // {thread-id, status}, so the working directory has to come from the rollout
@@ -167,7 +174,10 @@ function readRollout(filePath) {
       if (type === 'session_meta' && payload.cwd && !cwd) {
         cwd = String(payload.cwd);
       }
-      if (payload.model && !model) model = String(payload.model);
+      if (payload.model) {
+        if (!model) model = String(payload.model);
+        currentModel = String(payload.model);
+      }
       continue;
     }
 
@@ -202,6 +212,7 @@ function readRollout(filePath) {
           input_tokens: Math.max(0, curr.input_tokens - prev.input_tokens),
           output_tokens: Math.max(0, curr.output_tokens - prev.output_tokens),
           cache_read_tokens: Math.max(0, curr.cache_read_tokens - prev.cache_read_tokens),
+          cache_write_tokens: Math.max(0, curr.cache_write_tokens - prev.cache_write_tokens),
         };
       } else {
         usage = curr;
@@ -221,11 +232,13 @@ function readRollout(filePath) {
       // it lands on the day it was actually written rather than being dropped.
       ts: ts ?? lastSeenTs ?? startedAt ?? new Date().toISOString(),
       rawInputTokens: usage.input_tokens,
+      model: currentModel,
       turn: {
         inputTokens: uncachedInput,
         outputTokens: usage.output_tokens,
         cacheCreationTokens: 0,
         cacheReadTokens: usage.cache_read_tokens,
+        cacheWriteInputTokens: usage.cache_write_tokens,
         totalTokens: uncachedInput + usage.output_tokens + usage.cache_read_tokens,
       },
     });
@@ -254,7 +267,11 @@ export function parseCodexFiles(filePaths) {
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheReadTokens = 0;
+  let cacheWriteInputTokens = 0;
   let model;
+  // A page whose calls come before its first turn_context continues the
+  // previous page's turn, so the model carries over.
+  let callModel;
   let cwd;
   let startedAt;
   let endedAt;
@@ -274,8 +291,18 @@ export function parseCodexFiles(filePaths) {
       inputTokens += call.turn.inputTokens;
       outputTokens += call.turn.outputTokens;
       cacheReadTokens += call.turn.cacheReadTokens;
+      cacheWriteInputTokens += call.turn.cacheWriteInputTokens;
       addToDayBucket(dayBuckets, call.ts, call.turn);
-      entries.push({ ts: call.ts, turn: call.turn });
+      callModel = call.model ?? callModel ?? page.model;
+      // Priced per call (usage-buckets.mjs). Codex rollouts do not record the
+      // service tier, so speed is always standard. The prompt size is the raw
+      // input_tokens, which already include the cached part.
+      const key = makeBucketKey({
+        model: callModel ?? 'codex',
+        speed: STANDARD_SPEED,
+        contextSizeBucket: contextSizeBucket(call.rawInputTokens),
+      });
+      entries.push({ ts: call.ts, turn: call.turn, key });
     }
   }
 
@@ -293,10 +320,13 @@ export function parseCodexFiles(filePaths) {
     inputTokens,
     outputTokens,
     cacheReadTokens,
+    cacheWriteInputTokens,
     totalTokens,
     byDate: sortDayBuckets(dayBuckets),
-    // One entry per API call, for splitting the thread at an instant (a
-    // directory connected mid-thread). Counts and timestamps only.
+    // One entry per API call: what it used, when, and what it is priced as.
+    // The upload sums these per bucket key and day, and cuts them at an
+    // instant when a directory is connected mid-thread. Counts, timestamps
+    // and model names only.
     entries,
   };
 }

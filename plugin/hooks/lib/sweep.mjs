@@ -60,6 +60,7 @@ import { loadScanCache, saveScanCache, isUnchanged, rememberScan, getCacheEntry 
 import { splitSessionDelta } from './daily-split.mjs';
 import { uploadEvents } from './transport.mjs';
 import { resolveUploadPlan, uploadSessionDelta, uploadWithContext } from './upload-context.mjs';
+import { bucketEventFields } from './usage-buckets.mjs';
 import { parseClaudeSession, convertLineCountedWatermark } from '../claude/parse-claude.mjs';
 import { findCodexSessionFiles, parseCodexFiles } from '../codex/parse-codex.mjs';
 
@@ -322,22 +323,25 @@ function buildUsageEvent(source, deviceId, sessionId, model, piece, watermark) {
     event_id: deriveEventId(source, sessionId, piece, watermark),
     device_id: deviceId,
     source,
-    model,
+    // Priced as the key says: one event per bucket key and day, as the direct
+    // hooks send (usage-buckets.mjs).
+    ...bucketEventFields(piece.key, model),
     session_id: sessionId,
     started_at: piece.startedAt,
     ended_at: piece.endedAt ?? piece.startedAt,
     input_tokens: piece.inputTokens,
     output_tokens: piece.outputTokens,
-    // Codex reports no cache-creation tokens; keep its wire shape unchanged.
-    // For Claude the 5m/1h pair is a breakdown of cache_creation_tokens (priced
-    // at 1.25x and 2x input respectively), not additional tokens.
+    // Codex reports no cache-creation tokens; keep its wire shape the same as
+    // codex/event.mjs. For Claude the 5m/1h pair is a breakdown of
+    // cache_creation_tokens (priced at 1.25x and 2x input respectively), not
+    // additional tokens.
     ...(source === 'claude_code'
       ? {
           cache_creation_tokens: piece.cacheCreationTokens ?? 0,
           cache_creation_5m_tokens: piece.cacheCreation5mTokens ?? 0,
           cache_creation_1h_tokens: piece.cacheCreation1hTokens ?? 0,
         }
-      : {}),
+      : { cache_write_input_tokens: piece.cacheWriteInputTokens ?? 0 }),
     cache_read_tokens: piece.cacheReadTokens,
     total_tokens: piece.totalTokens,
     collector_version: COLLECTOR_VERSION,

@@ -24,6 +24,7 @@
  */
 
 import { computeDelta } from './config.mjs';
+import { bucketKeyString, makeBucketKey } from './usage-buckets.mjs';
 
 // `cacheCreation5mTokens` + `cacheCreation1hTokens` are a breakdown OF
 // `cacheCreationTokens`, not additions to it — they are deliberately excluded
@@ -31,6 +32,11 @@ import { computeDelta } from './config.mjs';
 // carried through the split because the two TTLs are priced differently
 // (1.25x input for 5-minute writes, 2x for 1-hour), and collapsing them into
 // one number is why cache-heavy sessions were costed at zero.
+//
+// `cacheWriteInputTokens` is Codex's `cache_write_input_tokens`, which OpenAI
+// bills from GPT-6.x on. Whether it is already inside Codex's input_tokens is
+// not known, so it is carried on its own and never added to `totalTokens` or
+// subtracted from input; the server decides once it has a price for it.
 export const TOKEN_FIELDS = [
   'inputTokens',
   'outputTokens',
@@ -38,6 +44,7 @@ export const TOKEN_FIELDS = [
   'cacheCreation5mTokens',
   'cacheCreation1hTokens',
   'cacheReadTokens',
+  'cacheWriteInputTokens',
   'totalTokens',
 ];
 
@@ -69,6 +76,7 @@ export function addToDayBucket(buckets, isoTs, tokens) {
       cacheCreation5mTokens: 0,
       cacheCreation1hTokens: 0,
       cacheReadTokens: 0,
+      cacheWriteInputTokens: 0,
       totalTokens: 0,
     };
     buckets.set(date, bucket);
@@ -165,80 +173,148 @@ export function bucketEntriesByDay(entries) {
   return sortDayBuckets(buckets);
 }
 
+function zeroTotals() {
+  return Object.fromEntries(TOKEN_FIELDS.map((field) => [field, 0]));
+}
+
+function normalizeTotals(totals) {
+  return Object.fromEntries(TOKEN_FIELDS.map((field) => [field, toNN(totals?.[field])]));
+}
+
 function sumBuckets(buckets) {
-  const totals = Object.fromEntries(TOKEN_FIELDS.map((field) => [field, 0]));
+  const totals = zeroTotals();
   for (const bucket of buckets) {
     for (const field of TOKEN_FIELDS) totals[field] += toNN(bucket[field]);
   }
   return totals;
 }
 
+/** Field-wise sum of a {keyString: totals} map — a session's flat total. */
+export function sumByKey(byKey) {
+  return sumBuckets(Object.values(byKey ?? {}));
+}
+
+const byTime = (a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0);
+
 /**
- * Split a session's outstanding delta at the moment its directory was
- * connected (see resolveRoute's hand-off).
+ * Spread a flat session watermark over bucket keys.
  *
- * The parser's per-response entries are cut at `splitAt`, so a day that
- * contains the connection yields one bucket on each side. Then, field by field:
+ * Ledger records written before #19 hold one total per session. Under the
+ * same premise as splitDeltaByDate — what was sent is the session's earliest
+ * tokens — charging that total against the responses in time order, field by
+ * field, says how much of it each key already carried. Whatever exceeds the
+ * transcript (one that shrank, say) is simply not allocated: it was already
+ * sent, and allocating it would only hold back new tokens.
  *
- *   before   = everything from before `splitAt`
- *   earlier  = before − alreadySent              (the pre-connect tail not yet sent)
- *   later    = cumulative − max(alreadySent, before)
+ * @param {Array<{ts: string, turn: object, key?: object}>} entries
+ * @param {object} totals - the flat watermark
+ * @returns {Record<string, object>} keyString -> totals
+ */
+export function allocateWatermarkByTime(entries, totals) {
+  const remaining = normalizeTotals(totals);
+  const byKey = {};
+  for (const entry of [...entries].sort(byTime)) {
+    const into = (byKey[bucketKeyString(entry.key)] ??= zeroTotals());
+    for (const field of TOKEN_FIELDS) {
+      const charged = Math.min(toNN(entry.turn[field]), remaining[field]);
+      remaining[field] -= charged;
+      into[field] += charged;
+    }
+  }
+  return byKey;
+}
+
+/**
+ * A session's outstanding delta, per bucket key (see usage-buckets.mjs) and
+ * calendar day, optionally cut at the moment its directory was connected.
  *
- * Both are computed with splitDeltaByDate, whose premise — what was already
- * sent is the session's earliest tokens — is what makes this exact. `later`
- * charges `max(alreadySent, before)` against all buckets in time order; that
- * always covers every pre-connect bucket, so only post-connect tokens remain.
- * Post-connect tokens an older collector already sent to the community server
- * are absorbed by the max: they cannot be recalled, but are not sent twice.
+ * Each key is its own small session: its responses become day buckets and
+ * splitDeltaByDate charges that key's watermark against them. Every piece
+ * carries its `key` and `keyString`, so it becomes an event priced as that
+ * model, speed and prompt-size tier.
  *
- * Without per-response entries there is no way to tell the two sides apart.
- * Every parser provides them; a session without them is treated as entirely
- * post-connect, the side this hand-off exists to fix.
+ * With `splitAt` (a hand-off, see resolveRoute) each key is also cut at that
+ * instant, field by field:
+ *
+ *   before   = the key's tokens from before `splitAt`
+ *   earlier  = before − sent                     (the pre-connect tail not yet sent)
+ *   later    = cumulative − max(sent, before)
+ *
+ * `later` charges `max(sent, before)` against all of the key's buckets in time
+ * order; that always covers every pre-connect bucket, so only post-connect
+ * tokens remain. Post-connect tokens an older collector already sent to the
+ * community server are absorbed by the max: they cannot be recalled, but are
+ * not sent twice.
+ *
+ * Each side returns its pieces, the per-key watermark their event ids derive
+ * from, and `record` — the per-key ledger once that side has landed. Keys the
+ * ledger knows but the transcript no longer has are carried over unchanged.
+ *
+ * Without per-response entries (an unexpected parse result) there is nothing
+ * to key or cut by: the whole flat delta becomes one key under the session's
+ * model, on the post-connect side.
  *
  * @param {object} parsed - parser output carrying `entries`
- * @param {object} alreadySent - cumulative totals already uploaded
- * @param {string} splitAt - ISO-8601 instant of the connection
- * @returns {{
- *   earlier: {pieces: object[], watermark: object, sentAfter: object},
- *   later: {pieces: object[], watermark: object}
- * }} each side's pieces, the watermark its event ids derive from, and (for
- *   `earlier`) the ledger value once it has landed
+ * @param {Record<string, object>} sentByKey - per-key totals already uploaded
+ * @param {string|null} [splitAt] - ISO-8601 instant of the connection
+ * @returns {{earlier: object|null, later: object}} each
+ *   `{pieces, watermarks: {keyString: totals}, record: {keyString: totals}}`;
+ *   `earlier` is null without `splitAt`
  */
-export function splitHandoffDelta(parsed, alreadySent, splitAt) {
-  const sent = Object.fromEntries(TOKEN_FIELDS.map((field) => [field, toNN(alreadySent?.[field])]));
+export function splitBucketedDelta(parsed, sentByKey, splitAt = null) {
+  const earlier = splitAt ? { pieces: [], watermarks: {}, record: { ...sentByKey } } : null;
+  const later = { pieces: [], watermarks: {}, record: { ...sentByKey } };
 
   if (!Array.isArray(parsed?.entries)) {
-    return {
-      earlier: { pieces: [], watermark: sent, sentAfter: sent },
-      later: { pieces: splitSessionDelta(parsed, sent), watermark: sent },
-    };
+    const key = makeBucketKey({ model: parsed?.model });
+    const keyString = bucketKeyString(key);
+    const sent = sumByKey(sentByKey);
+    later.pieces = splitSessionDelta(parsed, sent).map((piece) => ({ ...piece, key, keyString }));
+    later.watermarks = { [keyString]: sent };
+    later.record = { [keyString]: normalizeTotals(parsed) };
+    return { earlier, later };
   }
 
-  const cut = Date.parse(splitAt);
-  const beforeEntries = [];
-  const afterEntries = [];
+  const groups = new Map();
   for (const entry of parsed.entries) {
-    (Date.parse(entry.ts) < cut ? beforeEntries : afterEntries).push(entry);
+    const keyString = bucketKeyString(entry.key);
+    if (!groups.has(keyString)) groups.set(keyString, { key: makeBucketKey(entry.key ?? {}), entries: [] });
+    groups.get(keyString).entries.push(entry);
   }
-  const beforeBuckets = bucketEntriesByDay(beforeEntries);
-  const afterBuckets = bucketEntriesByDay(afterEntries);
 
-  const before = sumBuckets(beforeBuckets);
-  const covered = Object.fromEntries(
-    TOKEN_FIELDS.map((field) => [field, Math.max(sent[field], before[field])])
-  );
+  const cut = splitAt ? Date.parse(splitAt) : null;
+  for (const [keyString, { key, entries }] of groups) {
+    const sent = normalizeTotals(sentByKey?.[keyString]);
+    const tag = (pieces) => pieces.map((piece) => ({ ...piece, key, keyString }));
 
-  return {
-    earlier: {
-      pieces: splitDeltaByDate(beforeBuckets, sent),
-      watermark: sent,
-      sentAfter: covered,
-    },
-    later: {
-      pieces: splitDeltaByDate([...beforeBuckets, ...afterBuckets], covered),
-      watermark: covered,
-    },
-  };
+    if (!splitAt) {
+      const buckets = bucketEntriesByDay(entries);
+      later.pieces.push(...tag(splitDeltaByDate(buckets, sent)));
+      later.watermarks[keyString] = sent;
+      later.record[keyString] = sumBuckets(buckets);
+      continue;
+    }
+
+    const beforeBuckets = bucketEntriesByDay(entries.filter((e) => Date.parse(e.ts) < cut));
+    const afterBuckets = bucketEntriesByDay(entries.filter((e) => !(Date.parse(e.ts) < cut)));
+    const before = sumBuckets(beforeBuckets);
+    const covered = Object.fromEntries(TOKEN_FIELDS.map((f) => [f, Math.max(sent[f], before[f])]));
+
+    earlier.pieces.push(...tag(splitDeltaByDate(beforeBuckets, sent)));
+    earlier.watermarks[keyString] = sent;
+    earlier.record[keyString] = covered;
+
+    later.pieces.push(...tag(splitDeltaByDate([...beforeBuckets, ...afterBuckets], covered)));
+    later.watermarks[keyString] = covered;
+    later.record[keyString] = sumBuckets([...beforeBuckets, ...afterBuckets]);
+  }
+
+  // Day first, then key: the order events are built and uploaded in.
+  const order = (a, b) =>
+    a.date < b.date ? -1 : a.date > b.date ? 1 : a.keyString < b.keyString ? -1 : a.keyString > b.keyString ? 1 : 0;
+  later.pieces.sort(order);
+  earlier?.pieces.sort(order);
+  return { earlier, later };
 }
 
 /**

@@ -283,11 +283,16 @@ Codex 서브에이전트 종료(SubagentStop) → plugin/hooks/codex/subagent-st
 ## 개인정보 보호 모델
 
 수집하는 데이터:
-- 토큰 수 (input, output, cache creation, cache read)
+- 토큰 수 (input, output, cache creation, cache read, Codex의 cache write)
 - 캐시 쓰기의 TTL 내역 (5분/1시간) — 두 TTL의 단가가 달라 비용 계산에 필요합니다.
   캐시 쓰기 총량의 내역일 뿐 별도의 토큰이 아닙니다
 - 세션 시작/종료 시간
 - AI 모델명
+- 단가 구분값 — 응답 속도(`speed`: `standard`/`fast`), 요청 크기 구간(`context_size_bucket`:
+  `up_to_100k`/`up_to_272k`/`over_272k`), 추론 지역(`inference_geo`, Claude만). 한 세션의 토큰을
+  응답마다 이 값과 모델명으로 묶어 묶음마다 이벤트를 따로 보냅니다. 그래서 Opus 세션 안의 Haiku 서브에이전트가
+  Opus 단가로 계산되지 않습니다. 요청 크기는 구간 이름만 보내고 실제 토큰 수는 보내지 않습니다.
+  Codex 롤아웃에는 서비스 등급이 남지 않아 Codex의 `speed`는 항상 `standard`입니다
 - 운영체제 종류 (기기 등록 시 1회)
 - 익명화된 기기 ID
 - 요금제 스냅샷: 요금제 이름과 5시간·주간 잔여 rate-limit %, 그리고 그 판독의 원본 CLI 출력

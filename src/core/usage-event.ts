@@ -50,6 +50,23 @@ export interface UsageEvent {
   cache_creation_5m_tokens?: number;
   cache_creation_1h_tokens?: number;
   cache_read_tokens?: number;
+  /**
+   * Codex only: `cache_write_input_tokens`, billed by OpenAI from GPT-6.x on.
+   * Not part of total_tokens and not subtracted from input_tokens, since
+   * whether Codex's input already includes it is unknown.
+   */
+  cache_write_input_tokens?: number;
+  /**
+   * What the tokens are priced as. A session is uploaded as one event per
+   * (model, speed, context_size_bucket, inference_geo) and day, so a Haiku
+   * subagent in an Opus session, a fast-mode response or a long prompt is
+   * priced as itself (plugin/hooks/lib/usage-buckets.mjs).
+   */
+  speed?: string;
+  /** Which side of a model's long-prompt price boundary the requests fell on. */
+  context_size_bucket?: "up_to_100k" | "up_to_272k" | "over_272k";
+  /** Claude only: where the requests were served (`global`, `us`, ...). */
+  inference_geo?: string;
   total_tokens: number;
   estimated_cost_usd?: number;
   collector_version: string;

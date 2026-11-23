@@ -28,6 +28,12 @@ const SAFE_EVENT = {
   output_tokens: 2000,
   cache_creation_tokens: 100,
   cache_read_tokens: 400,
+  // Per-bucket pricing fields (#19). The issue's `prompt_size_bucket` would be
+  // rejected here; the size tier travels as `context_size_bucket`.
+  speed: 'fast',
+  context_size_bucket: 'up_to_100k',
+  inference_geo: 'global',
+  cache_write_input_tokens: 0,
   total_tokens: 7500,
   collector_version: '0.3.0',
 };
