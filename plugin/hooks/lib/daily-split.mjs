@@ -157,6 +157,91 @@ export function splitSessionDelta(parsed, alreadySent) {
 }
 
 /**
+ * Day buckets for a list of per-response entries ({ts, turn}), date-ascending.
+ */
+export function bucketEntriesByDay(entries) {
+  const buckets = new Map();
+  for (const { ts, turn } of entries) addToDayBucket(buckets, ts, turn);
+  return sortDayBuckets(buckets);
+}
+
+function sumBuckets(buckets) {
+  const totals = Object.fromEntries(TOKEN_FIELDS.map((field) => [field, 0]));
+  for (const bucket of buckets) {
+    for (const field of TOKEN_FIELDS) totals[field] += toNN(bucket[field]);
+  }
+  return totals;
+}
+
+/**
+ * Split a session's outstanding delta at the moment its directory was
+ * connected (see resolveRoute's hand-off).
+ *
+ * The parser's per-response entries are cut at `splitAt`, so a day that
+ * contains the connection yields one bucket on each side. Then, field by field:
+ *
+ *   before   = everything from before `splitAt`
+ *   earlier  = before − alreadySent              (the pre-connect tail not yet sent)
+ *   later    = cumulative − max(alreadySent, before)
+ *
+ * Both are computed with splitDeltaByDate, whose premise — what was already
+ * sent is the session's earliest tokens — is what makes this exact. `later`
+ * charges `max(alreadySent, before)` against all buckets in time order; that
+ * always covers every pre-connect bucket, so only post-connect tokens remain.
+ * Post-connect tokens an older collector already sent to the community server
+ * are absorbed by the max: they cannot be recalled, but are not sent twice.
+ *
+ * Without per-response entries there is no way to tell the two sides apart.
+ * Every parser provides them; a session without them is treated as entirely
+ * post-connect, the side this hand-off exists to fix.
+ *
+ * @param {object} parsed - parser output carrying `entries`
+ * @param {object} alreadySent - cumulative totals already uploaded
+ * @param {string} splitAt - ISO-8601 instant of the connection
+ * @returns {{
+ *   earlier: {pieces: object[], watermark: object, sentAfter: object},
+ *   later: {pieces: object[], watermark: object}
+ * }} each side's pieces, the watermark its event ids derive from, and (for
+ *   `earlier`) the ledger value once it has landed
+ */
+export function splitHandoffDelta(parsed, alreadySent, splitAt) {
+  const sent = Object.fromEntries(TOKEN_FIELDS.map((field) => [field, toNN(alreadySent?.[field])]));
+
+  if (!Array.isArray(parsed?.entries)) {
+    return {
+      earlier: { pieces: [], watermark: sent, sentAfter: sent },
+      later: { pieces: splitSessionDelta(parsed, sent), watermark: sent },
+    };
+  }
+
+  const cut = Date.parse(splitAt);
+  const beforeEntries = [];
+  const afterEntries = [];
+  for (const entry of parsed.entries) {
+    (Date.parse(entry.ts) < cut ? beforeEntries : afterEntries).push(entry);
+  }
+  const beforeBuckets = bucketEntriesByDay(beforeEntries);
+  const afterBuckets = bucketEntriesByDay(afterEntries);
+
+  const before = sumBuckets(beforeBuckets);
+  const covered = Object.fromEntries(
+    TOKEN_FIELDS.map((field) => [field, Math.max(sent[field], before[field])])
+  );
+
+  return {
+    earlier: {
+      pieces: splitDeltaByDate(beforeBuckets, sent),
+      watermark: sent,
+      sentAfter: covered,
+    },
+    later: {
+      pieces: splitDeltaByDate([...beforeBuckets, ...afterBuckets], covered),
+      watermark: covered,
+    },
+  };
+}
+
+/**
  * Total tokens across a split, for logging and "did anything accrue" checks.
  */
 export function sumPieceTokens(pieces) {

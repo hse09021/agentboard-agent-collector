@@ -28,13 +28,11 @@ import { isRevokedDeviceError, revokedDeviceMessage } from '../lib/revoked.mjs';
 import {
   loadConfigV2,
   getSentTotals,
-  markTotalsSent,
   acquireSessionLock,
   releaseSessionLock,
 } from '../lib/config.mjs';
-import { splitSessionDelta } from '../lib/daily-split.mjs';
-import { resolveUploadContextWithRefresh, uploadWithContext } from '../lib/upload-context.mjs';
-import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
+import { resolveUploadPlan, uploadSessionDelta } from '../lib/upload-context.mjs';
+import { ForbiddenDataError } from '../lib/forbidden-data-guard.mjs';
 import { readStdin } from '../lib/read-stdin.mjs';
 import { recordAgentHomesFromEnv } from '../lib/agent-homes.mjs';
 import { isSweepEnabled, maybeSpawnSweep } from '../lib/sweep.mjs';
@@ -71,23 +69,18 @@ async function main() {
   // The route (and therefore the credential) depends on the working directory,
   // which the hook payload carries. Resolved here so every later step uses the
   // right server.
-  const ctx = await resolveUploadContextWithRefresh({
-    source: 'codex',
-    sessionId: sessionId,
-    cwd: payload.cwd,
-  });
-  if (!ctx.ok) {
-    process.stderr.write(`agentboard-codex-sessionend: ${ctx.reason}\n`);
+  const plan = resolveUploadPlan({ source: 'codex', sessionId, cwd: payload.cwd });
+  if (!plan.ok) {
+    process.stderr.write(`agentboard-codex-sessionend: ${plan.reason}\n`);
     process.exit(0);
   }
-  const { deviceId, route } = ctx;
 
   // 1. Force a rate-limit snapshot (throttle bypassed for the end-of-session
   //    resting value). Reads codex app-server's rate limits — a metadata RPC,
   //    not a billable turn, and it does not fire codex hooks, so no recursion.
   const usageSnapshot = await captureUsageLimitSnapshot('codex', {
     minIntervalMs: 0,
-    route: route.routeId,
+    route: plan.route.routeId,
   }).catch(() => null);
 
   // 2. Guarded parent-session token residue sweep, under the SAME per-session
@@ -102,65 +95,48 @@ async function main() {
   //    the ledger on (otherwise the lookup would miss and we'd re-upload the
   //    whole session as a bogus "delta") and gives a baseline to diff against.
   //    Any session with tokens has fired notify at least once, so this never
-  //    drops legitimate tokens.
+  //    drops legitimate tokens. The ledger is read inside the lock: taking the
+  //    lock first is what guarantees a concurrent notify has not advanced it
+  //    between the read and the upload.
   let parsed = null;
-  let pieces = [];
-  // Declared out here only so the event builder can reuse the exact watermark
-  // this delta was computed against (it is part of the deterministic event id).
-  // The READ stays inside the lock: taking the lock first is what guarantees a
-  // concurrent notify has not advanced the ledger between the read and the
-  // upload — reading it earlier would reintroduce that race. Losing the lock
-  // leaves this null, and also leaves `pieces` empty, so no event is ever built
-  // from it.
-  let alreadySent = null;
   if (acquireSessionLock('codex', sessionId)) {
     process.on('exit', () => releaseSessionLock('codex', sessionId));
-    alreadySent = getSentTotals('codex', sessionId);
-    if (alreadySent.totalTokens > 0) {
-      parsed = parseCodexSession(sessionId);
-      if (parsed && parsed.totalTokens > 0) {
-        // Split per calendar day: residue from a thread that ran past midnight
-        // belongs to the day it accrued on, not to the thread's start date.
-        pieces = splitSessionDelta(parsed, alreadySent);
-      }
+    if (getSentTotals('codex', sessionId).totalTokens > 0) {
+      const session = parseCodexSession(sessionId);
+      // Split per calendar day (and at the connection, for a hand-off):
+      // residue from a thread that ran past midnight belongs to the day it
+      // accrued on, not to the thread's start date.
+      if (session && session.totalTokens > 0) parsed = session;
     }
   }
-  const hasTokens = pieces.length > 0;
 
-  if (!hasTokens && !usageSnapshot) process.exit(0);
-
-  const events = hasTokens
-    ? pieces.map((piece) => buildUsageEvent(deviceId, sessionId, parsed.model, piece, alreadySent))
-    : [buildUsageOnlyEvent(deviceId, sessionId)];
-  // Point-in-time rate-limit reading — most recent event only.
-  if (usageSnapshot) {
-    events[events.length - 1].usage_snapshot = {
-      ...usageSnapshot,
-      raw: sanitizeRawOutput(usageSnapshot.raw),
-    };
-  }
+  if (!parsed && !usageSnapshot) process.exit(0);
 
   try {
-    for (const event of events) assertNoForbiddenFields(event);
-  } catch (err) {
-    process.stderr.write(
-      `agentboard-codex-sessionend: forbidden field detected, upload aborted: ${err.message}\n`
-    );
-    process.exit(1);
-  }
-
-  try {
-    const verdict = await uploadWithContext(ctx, events);
+    const outcome = await uploadSessionDelta(plan, {
+      source: 'codex',
+      ledgerKey: sessionId,
+      parsed,
+      buildEvent: (deviceId, piece, watermark) =>
+        buildUsageEvent(deviceId, sessionId, parsed.model, piece, watermark),
+      snapshot: usageSnapshot,
+      buildSnapshotOnlyEvent: (deviceId) => buildUsageOnlyEvent(deviceId, sessionId),
+    });
 
     // A 2xx does not mean every event landed — the server reports per-event
     // rejections inside the body. Advancing the ledger past something the
     // server might still accept loses those tokens for good.
-    if (verdict && !verdict.canAdvanceLedger) {
+    if (outcome.status === 'held') {
       process.stderr.write('agentboard: server rejected this upload; it will be retried.\n');
       process.exit(1);
     }
-    if (hasTokens) markTotalsSent('codex', sessionId, parsed, route.routeId);
   } catch (err) {
+    if (err instanceof ForbiddenDataError) {
+      process.stderr.write(
+        `agentboard-codex-sessionend: forbidden field detected, upload aborted: ${err.message}\n`
+      );
+      process.exit(1);
+    }
     if (isRevokedDeviceError(err)) {
       process.stderr.write(revokedDeviceMessage('agentboard-codex-sessionend'));
       process.exit(1);

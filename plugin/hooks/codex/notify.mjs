@@ -22,15 +22,12 @@ import { buildUsageEvent, buildUsageOnlyEvent } from './event.mjs';
 import {
   loadConfigV2,
   getSentRoute,
-  getSentTotals,
-  markTotalsSent,
   acquireSessionLock,
   releaseSessionLock,
 } from '../lib/config.mjs';
-import { splitSessionDelta } from '../lib/daily-split.mjs';
-import { resolveUploadContextWithRefresh, uploadWithContext } from '../lib/upload-context.mjs';
+import { resolveUploadPlan, uploadSessionDelta } from '../lib/upload-context.mjs';
 import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
-import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
+import { ForbiddenDataError } from '../lib/forbidden-data-guard.mjs';
 
 const RETRY_MAX = 6;
 const RETRY_DELAY_MS = 1500;
@@ -165,84 +162,62 @@ async function main() {
 
   const usageSnapshot = await usageSnapshotPromise;
 
-  // Codex notify fires per-turn, so `parsed` (when present) holds the
-  // session's cumulative totals. Upload only the delta since the last turn
-  // we reported; otherwise the same session's later tokens would be dropped
-  // by session-level dedup. The delta is split per calendar day so a thread
-  // resumed the next day reports that day's tokens under that day. If nothing
-  // parsed at all, there's no delta to compute — fall through to the
-  // usage-snapshot-only path below.
-  let pieces = [];
-  // Read outside the branch: the watermark this delta was computed against is
-  // part of what makes each event's id deterministic.
-  const alreadySent = getSentTotals('codex', sessionId);
-  if (parsed && parsed.totalTokens > 0) {
-    pieces = splitSessionDelta(parsed, alreadySent);
-  }
-  const hasTokens = pieces.length > 0;
-
-  if (!hasTokens && !usageSnapshot) {
+  if (!(parsed && parsed.totalTokens > 0) && !usageSnapshot) {
     process.exit(0);
   }
 
   // Codex's notify payload carries only {thread-id, status}, so the routing
   // anchor comes from session_meta.cwd in the rollout file. It is used to pick
   // a destination and never uploaded.
-  const ctx = await resolveUploadContextWithRefresh({ source: 'codex', sessionId, cwd: parsed?.cwd });
-  if (!ctx.ok) {
-    process.stderr.write(`agentboard-codex: ${ctx.reason}\n`);
+  const plan = resolveUploadPlan({ source: 'codex', sessionId, cwd: parsed?.cwd });
+  if (!plan.ok) {
+    process.stderr.write(`agentboard-codex: ${plan.reason}\n`);
     process.exit(0);
   }
-  const { deviceId, route } = ctx;
 
-  // One event per day, all under the same session id: the server counts
-  // distinct session ids per bucket, so this stays one session per day rather
-  // than becoming several sessions.
-  const events = hasTokens
-    ? pieces.map((piece) => buildUsageEvent(deviceId, sessionId, parsed.model, piece, alreadySent))
-    : [buildUsageOnlyEvent(deviceId, sessionId)];
-  // The snapshot is a point-in-time rate-limit reading, not per-day data —
-  // attach it to the most recent event only.
-  if (usageSnapshot) {
-    events[events.length - 1].usage_snapshot = {
-      ...usageSnapshot,
-      raw: sanitizeRawOutput(usageSnapshot.raw),
-    };
-  }
-
-  // Privacy guard — never let a field carrying prompt/code/path/command data
-  // reach the upload call. Runs on the exact objects being uploaded, right
-  // before the network call (mirrors worker.mjs).
+  // Codex notify fires per-turn, so `parsed` (when present) holds the
+  // session's cumulative totals. Upload only the delta since the last turn we
+  // reported; otherwise the same session's later tokens would be dropped by
+  // session-level dedup. The delta is split per calendar day so a thread
+  // resumed the next day reports that day's tokens under that day — one event
+  // per day, all under the same session id, so the server still counts one
+  // session per day. A thread that started before its directory was connected
+  // is also split at the connection (see uploadSessionDelta).
+  //
+  // Recording the upload pins the session to its route: from here on it goes
+  // to that server regardless of where the user works next.
   try {
-    for (const event of events) assertNoForbiddenFields(event);
-  } catch (err) {
-    process.stderr.write(`agentboard-codex: forbidden field detected, upload aborted: ${err.message}\n`);
-    process.exit(1);
-  }
-
-  try {
-    // One batch, so a partial failure can't advance the ledger past days that
-    // never landed.
-    const verdict = await uploadWithContext(ctx, events);
+    const outcome = await uploadSessionDelta(plan, {
+      source: 'codex',
+      ledgerKey: sessionId,
+      parsed: parsed && parsed.totalTokens > 0 ? parsed : null,
+      buildEvent: (deviceId, piece, watermark) =>
+        buildUsageEvent(deviceId, sessionId, parsed.model, piece, watermark),
+      snapshot: usageSnapshot,
+      buildSnapshotOnlyEvent: (deviceId) => buildUsageOnlyEvent(deviceId, sessionId),
+    });
 
     // A 2xx is not proof the events landed — the server reports per-event
     // rejections inside the body. Advancing the ledger past something the
     // server might still accept loses those tokens permanently.
-    if (verdict && !verdict.canAdvanceLedger) {
+    if (outcome.status === 'held') {
       process.stderr.write('agentboard: server rejected this upload; it will be retried.\n');
       process.exit(1);
     }
-    if (verdict && verdict.allRejected) {
-      process.stderr.write(
-        `agentboard: the server rejected every event in this upload (${JSON.stringify(verdict.reasons)}).\n`
-      );
-    }
-    if (hasTokens) {
-      // Pins the session to this route: from here on it goes to this server
-      // regardless of where the user works next.
-      markTotalsSent('codex', sessionId, parsed, route.routeId);
+    for (const { verdict } of outcome.uploads) {
+      if (verdict && verdict.allRejected) {
+        process.stderr.write(
+          `agentboard: the server rejected every event in this upload (${JSON.stringify(verdict.reasons)}).\n`
+        );
+      }
     }
   } catch (err) {
+    // Privacy guard — never let a field carrying prompt/code/path/command data
+    // reach the upload call (mirrors worker.mjs).
+    if (err instanceof ForbiddenDataError) {
+      process.stderr.write(`agentboard-codex: forbidden field detected, upload aborted: ${err.message}\n`);
+      process.exit(1);
+    }
     if (isRevokedDeviceError(err)) {
       process.stderr.write(revokedDeviceMessage('agentboard-codex'));
       process.exit(1);

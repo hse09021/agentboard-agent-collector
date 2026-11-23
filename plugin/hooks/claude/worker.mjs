@@ -10,10 +10,12 @@
  * Workflow:
  *   1. Read & delete the payload file
  *   2. Confirm it's a Claude Code session (detectSource; anything else is dropped)
- *   3. Parse the transcript (incl. <session>/subagents/*.jsonl) for cumulative usage
- *   4. Reduce to the delta since the last upload (dedup via hook-sent.json)
- *   5. On SessionEnd, force a rate-limit snapshot (per-turn Stop stays throttled)
- *   6. Build a UsageEvent, run the privacy guard, POST to the agentboard API
+ *   3. Resolve the route, then parse the transcript (incl.
+ *      <session>/subagents/*.jsonl) for cumulative usage
+ *   4. On SessionEnd, force a rate-limit snapshot (per-turn Stop stays throttled)
+ *   5. Reduce to the delta since the last upload (dedup via hook-sent.json),
+ *      split at the connection when the session is being handed off
+ *   6. Build UsageEvents, run the privacy guard, POST to the agentboard API
  *   7. Record the cumulative totals as sent
  */
 
@@ -47,20 +49,17 @@ import {
   loadConfigV2,
   generateEventId,
   deriveEventId,
-  getSentTotals,
-  markTotalsSent,
   upgradeLineCountedTotals,
   acquireSessionLock,
   releaseSessionLock,
   COLLECTOR_VERSION,
 } from '../lib/config.mjs';
-import { resolveUploadContextWithRefresh, uploadWithContext } from '../lib/upload-context.mjs';
+import { resolveUploadPlan, uploadSessionDelta, uploadWithContext } from '../lib/upload-context.mjs';
 import { recordAgentHomesFromEnv } from '../lib/agent-homes.mjs';
 import { isSweepEnabled, maybeSpawnSweep } from '../lib/sweep.mjs';
-import { splitSessionDelta, sumPieceTokens } from '../lib/daily-split.mjs';
 import { registerDevice } from '../lib/transport.mjs';
 import { isRevokedDeviceError, revokedDeviceMessage } from '../lib/revoked.mjs';
-import { assertNoForbiddenFields, sanitizeRawOutput } from '../lib/forbidden-data-guard.mjs';
+import { ForbiddenDataError } from '../lib/forbidden-data-guard.mjs';
 import { parseClaudeSession, convertLineCountedWatermark } from './parse-claude.mjs';
 import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
 
@@ -88,12 +87,13 @@ function detectSource(payload) {
 // One event per calendar day of the delta. `piece.startedAt` falls inside
 // `piece.date`, which is what makes the server file these tokens under the day
 // they were actually spent rather than under the session's creation date.
-function buildUsageEvent(deviceId, source, sessionId, model, piece, alreadySent) {
+// `watermark` is the ledger value this piece was computed against.
+function buildUsageEvent(deviceId, source, sessionId, model, piece, watermark) {
   return {
     schema_version: '1.0',
     // Deterministic, so the server's (user_id, event_id) uniqueness can absorb
     // a racing hook or a retry after an ambiguous failure.
-    event_id: deriveEventId(source, sessionId, piece, alreadySent),
+    event_id: deriveEventId(source, sessionId, piece, watermark),
     device_id: deviceId,
     source,
     model,
@@ -137,6 +137,28 @@ function detectOs() {
   if (process.platform === 'darwin') return 'macos';
   if (process.platform === 'linux') return 'linux';
   return 'unknown';
+}
+
+// A wiped or reinstalled server no longer knows this device. Nothing else
+// re-registers from the hook path, so without this every developer goes
+// silently dark until someone happens to run `agentboard login`.
+// 403은 404와 정반대다. 기기가 사라진 게 아니라 사람이 끊은 것이므로
+// 재등록을 시도해선 안 된다 — 그러면 revoke 가 무의미해진다.
+async function uploadReregistering(ctx, events) {
+  try {
+    return await uploadWithContext(ctx, events, workerLog);
+  } catch (err) {
+    const deviceGone = /HTTP 404/.test(err.message) && /device_not_found/.test(err.message);
+    if (!deviceGone) throw err;
+
+    workerLog(`device_not_found on ${ctx.route.routeId} — attempting re-registration`);
+    const reregistered = await registerDevice(ctx.apiBaseUrl, ctx.token, ctx.deviceId, { os: detectOs() });
+    if (!reregistered) throw new Error(`re-registration failed after: ${err.message}`);
+
+    const verdict = await uploadWithContext(ctx, events, workerLog);
+    workerLog('upload success after re-registration');
+    return verdict;
+  }
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -225,29 +247,25 @@ async function main() {
   // whatever the AI tool happened to launch us with and would misroute. It is
   // read here and never uploaded.
   //
-  // The same step rotates the access token, or the project credential, if it
-  // is close to expiring. Shared with the Codex hooks and the sweep
-  // (upload-context.mjs), so there is one place that decides which server a
-  // token goes to: the default route's `.token` and a connected project's
-  // `.cred` are different servers' tokens, and sending either to the other
-  // server would show it to that server's operator. A pinned route whose
-  // binding is gone is skipped rather than falling back to another server; its
-  // tokens stay in the ledger and are recovered if the binding is restored.
-  //
-  // Never blocks the upload: transient failures keep the current credential,
-  // and a permanent refusal is recorded for the next CLI run, since nobody
-  // reads a hook's stderr.
-  const ctx = await resolveUploadContextWithRefresh(
-    { source, sessionId, cwd: payload.cwd },
-    (msg) => workerLog(msg)
-  );
-  if (!ctx.ok) {
-    workerLog(`SKIP: ${ctx.reason}`);
+  // Shared with the Codex hooks and the sweep (upload-context.mjs), so there
+  // is one place that decides which server a token goes to: the default
+  // route's `.token` and a connected project's `.cred` are different servers'
+  // tokens, and sending either to the other server would show it to that
+  // server's operator. A pinned route whose binding is gone is skipped rather
+  // than falling back to another server; its tokens stay in the ledger and
+  // are recovered if the binding is restored. A session that started before
+  // its directory was connected is handed off at the connection: earlier
+  // tokens to the community server, later ones to the organization's.
+  const plan = resolveUploadPlan({ source, sessionId, cwd: payload.cwd });
+  if (!plan.ok) {
+    workerLog(`SKIP: ${plan.reason}`);
     process.exit(0);
   }
-  const { route, apiBaseUrl, deviceId, pinnedRoute } = ctx;
 
-  workerLog(`route=${route.routeId} api=${apiBaseUrl} pinned=${pinnedRoute ?? 'none'}`);
+  workerLog(
+    `route=${plan.route.routeId} api=${plan.route.server.api_base_url} pinned=${plan.pinnedRoute ?? 'none'}` +
+      (plan.kind === 'handoff' ? ` handoff_from=${plan.from.routeId} split_at=${plan.splitAt}` : '')
+  );
 
   // 3.5 One in-flight upload per session. Must be taken before reading the
   // sent-totals ledger: a concurrent worker that read the same totals would
@@ -278,13 +296,6 @@ async function main() {
 
   workerLog(`parsed totalTokens=${parsed?.totalTokens ?? 'null'}`);
 
-  // 5. Reduce the cumulative session totals to only what is new since the last
-  // upload, split across the calendar days that new usage happened on. A
-  // session created yesterday and resumed today yields a piece dated today, so
-  // today's tokens are no longer filed under the session's creation date.
-  // `cumulative` is kept as the figure to persist afterwards.
-  const cumulative = parsed;
-  let pieces = [];
   // A record written before per-response counting holds an inflated
   // watermark; converted once here, or this session's new usage would be held
   // back until it outgrew the inflated figure.
@@ -294,32 +305,22 @@ async function main() {
   if (upgraded) {
     workerLog(`ledger converted to per-response counting: ${upgraded.from} -> ${upgraded.to}`);
   }
-  // Read once, outside the branch: the watermark this delta was computed
-  // against is part of what makes each event's id deterministic, so the event
-  // builder below needs the same value.
-  const alreadySent = getSentTotals(source, sessionId);
-  if (parsed) {
-    pieces = splitSessionDelta(parsed, alreadySent);
-    workerLog(
-      `delta totalTokens=${sumPieceTokens(pieces)} across ${pieces.length} day(s) ` +
-        `[${pieces.map((p) => `${p.date}:${p.totalTokens}`).join(' ')}] ` +
-        `(cumulative=${parsed.totalTokens}, alreadySent=${alreadySent.totalTokens})`
-    );
-  }
 
-  // 5.5 Best-effort usage-limit snapshot (`/usage`), fully independent of token
+  // 5. Best-effort usage-limit snapshot (`/usage`), fully independent of token
   // parse outcome — must never block or fail the existing token-collection path.
   // On SessionEnd (the last invocation before the session goes idle) bypass the
   // 10-min throttle so the resting 5h/weekly value reflects the true
   // end-of-session state rather than a reading up to 10 min stale; per-turn Stop
-  // invocations stay throttled.
+  // invocations stay throttled. Throttled under the route new usage goes to,
+  // which is also the route the snapshot is attached to.
   let usageSnapshot = null;
   if (source === 'claude_code') {
     try {
       const forceCapture = payload.hook_event_name === 'SessionEnd';
+      const route = plan.route.routeId;
       usageSnapshot = await captureUsageLimitSnapshot(
         source,
-        forceCapture ? { minIntervalMs: 0, route: route.routeId } : { route: route.routeId }
+        forceCapture ? { minIntervalMs: 0, route } : { route }
       );
       workerLog(`usageSnapshot=${usageSnapshot ? 'captured' : 'none'} force=${forceCapture}`);
     } catch (err) {
@@ -328,95 +329,54 @@ async function main() {
     }
   }
 
-  const hasTokens = pieces.length > 0;
-  if (!hasTokens && !usageSnapshot) {
-    workerLog(`SKIP: no tokens and no usage snapshot (parsed=${parsed ? 'non-null' : 'null'})`);
-    process.exit(0);
-  }
-
-  // 6. Build one event per day, all under the same session id. The server
-  // counts distinct session ids per bucket, so a session spanning two days
-  // shows up as one session on each of them rather than as two sessions.
-  const events = hasTokens
-    ? pieces.map((piece) =>
-        buildUsageEvent(deviceId, source, sessionId, cumulative.model, piece, alreadySent)
-      )
-    : [buildUsageOnlyEvent(deviceId, source, sessionId)];
-
-  // The snapshot is a point-in-time reading of the account's rate limits, not
-  // per-day data — attach it to the most recent event only, never to each.
-  if (usageSnapshot) {
-    events[events.length - 1].usage_snapshot = {
-      ...usageSnapshot,
-      raw: sanitizeRawOutput(usageSnapshot.raw),
-    };
-  }
-
-  // 6.5 Privacy guard — never let a field carrying prompt/code/path/command
-  // data reach the upload call. This must run on the exact objects being
-  // uploaded, right before the network call.
+  // 6-8. Reduce the cumulative totals to what is new since the last upload,
+  // split across the calendar days it happened on (and, for a hand-off, at the
+  // moment of connection), upload, and record the cumulative totals now sent.
+  // A session created yesterday and resumed today yields a piece dated today,
+  // so today's tokens are no longer filed under the session's creation date.
+  // One event per day, all under the same session id: the server counts
+  // distinct session ids per bucket, so a session spanning two days shows up
+  // as one session on each of them rather than as two sessions.
+  //
+  // Recording pins the session to the route it went to: from now on it goes to
+  // that server no matter where the user cd's to.
+  let outcome;
   try {
-    for (const event of events) assertNoForbiddenFields(event);
+    outcome = await uploadSessionDelta(plan, {
+      source,
+      ledgerKey: sessionId,
+      parsed,
+      buildEvent: (deviceId, piece, watermark) =>
+        buildUsageEvent(deviceId, source, sessionId, parsed.model, piece, watermark),
+      snapshot: usageSnapshot,
+      buildSnapshotOnlyEvent: (deviceId) => buildUsageOnlyEvent(deviceId, source, sessionId),
+      upload: uploadReregistering,
+      log: workerLog,
+    });
   } catch (err) {
-    workerLog(`BLOCKED: forbidden field detected, upload aborted: ${err.message}`);
-    process.stderr.write(`agentboard-worker: forbidden field detected, upload aborted: ${err.message}\n`);
-    process.exit(1);
-  }
-
-  // 7. Send to API — one batch, so a partial failure can't advance the ledger
-  // past days that never landed.
-  let verdict;
-  try {
-    workerLog(
-      `uploading ${events.length} event(s) total_tokens=${events.reduce((n, e) => n + e.total_tokens, 0)}`
-    );
-    verdict = await uploadWithContext(ctx, events, workerLog);
-  } catch (err) {
-    // A wiped or reinstalled server no longer knows this device. Nothing else
-    // re-registers from the hook path, so without this every developer goes
-    // silently dark until someone happens to run `agentboard login`.
-    // 403은 404와 정반대다. 기기가 사라진 게 아니라 사람이 끊은 것이므로
-    // 재등록을 시도해선 안 된다 — 그러면 revoke 가 무의미해진다.
+    // Privacy guard — never let a field carrying prompt/code/path/command
+    // data reach the upload call.
+    if (err instanceof ForbiddenDataError) {
+      workerLog(`BLOCKED: forbidden field detected, upload aborted: ${err.message}`);
+      process.stderr.write(`agentboard-worker: forbidden field detected, upload aborted: ${err.message}\n`);
+      process.exit(1);
+    }
     if (isRevokedDeviceError(err)) {
       workerLog('device revoked — halting, re-login required');
       process.stderr.write(revokedDeviceMessage('agentboard-worker'));
       process.exit(1);
     }
-
-    const deviceGone = /HTTP 404/.test(err.message) && /device_not_found/.test(err.message);
-    if (!deviceGone) {
-      workerLog(`ERROR: upload failed: ${err.message}`);
-      process.stderr.write(`agentboard-worker: upload failed: ${err.message}\n`);
-      process.exit(1);
-    }
-
-    workerLog('device_not_found — attempting re-registration');
-    const reregistered = await registerDevice(apiBaseUrl, ctx.token, deviceId, { os: detectOs() });
-    if (!reregistered) {
-      workerLog('ERROR: re-registration failed');
-      process.exit(1);
-    }
-    try {
-      verdict = await uploadWithContext(ctx, events, workerLog);
-      workerLog('upload success after re-registration');
-    } catch (retryErr) {
-      workerLog(`ERROR: upload failed after re-registration: ${retryErr.message}`);
-      process.exit(1);
-    }
+    workerLog(`ERROR: upload failed: ${err.message}`);
+    process.stderr.write(`agentboard-worker: upload failed: ${err.message}\n`);
+    process.exit(1);
   }
 
-  if (verdict && verdict.parsed) {
-    workerLog(
-      `server verdict accepted=${verdict.accepted} duplicates=${verdict.duplicates} ` +
-        `rejected=${verdict.rejected} reasons=${JSON.stringify(verdict.reasons)}`
-    );
+  if (outcome.status === 'nothing') {
+    workerLog(`SKIP: no tokens and no usage snapshot (parsed=${parsed ? 'non-null' : 'null'})`);
+    process.exit(0);
   }
 
-  // A 2xx is not proof that the events landed — the server reports per-event
-  // rejections inside the body of a 200. Advancing the ledger past an event the
-  // server could still accept on a retry loses those tokens permanently,
-  // because deltas are computed against the ledger.
-  if (verdict && !verdict.canAdvanceLedger) {
+  if (outcome.status === 'held') {
     workerLog('HOLD: server rejected events retriably — ledger not advanced');
     process.stderr.write('agentboard: server rejected this upload; it will be retried.\n');
     process.exit(1);
@@ -425,23 +385,15 @@ async function main() {
   // Permanent rejections are given up on, but never silently: a whole batch
   // rejected outright almost always means a version mismatch with the server,
   // and stderr is the only channel the user actually sees.
-  if (verdict && verdict.allRejected) {
-    process.stderr.write(
-      `agentboard: the server rejected every event in this upload ` +
-        `(${JSON.stringify(verdict.reasons)}). Run \`agentboard doctor\` for details.\n`
-    );
+  for (const { verdict } of outcome.uploads) {
+    if (verdict && verdict.allRejected) {
+      process.stderr.write(
+        `agentboard: the server rejected every event in this upload ` +
+          `(${JSON.stringify(verdict.reasons)}). Run \`agentboard doctor\` for details.\n`
+      );
+    }
   }
 
-  // 8. Record the cumulative totals now uploaded, so the next invocation for
-  // this session only sends what accrues after this point. Skipped when the
-  // session had no tokens at all (usage-snapshot-only upload) — writing zeroed
-  // totals there would discard what a previous invocation had already recorded.
-  //
-  // The route is pinned here, on the first successful upload: from now on this
-  // session goes to this server no matter where the user cd's to.
-  if (cumulative) {
-    markTotalsSent(source, sessionId, cumulative, route.routeId);
-  }
   workerLog('done');
   process.exit(0);
 }

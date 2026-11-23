@@ -19,15 +19,9 @@
 
 import { parseCodexFile } from './parse-codex.mjs';
 import { buildUsageEvent } from './event.mjs';
-import {
-  loadConfigV2,
-  getSentTotals,
-  markTotalsSent,
-} from '../lib/config.mjs';
 import { isRevokedDeviceError, revokedDeviceMessage } from '../lib/revoked.mjs';
-import { splitSessionDelta } from '../lib/daily-split.mjs';
-import { resolveUploadContextWithRefresh, uploadWithContext } from '../lib/upload-context.mjs';
-import { assertNoForbiddenFields } from '../lib/forbidden-data-guard.mjs';
+import { resolveUploadPlan, uploadSessionDelta } from '../lib/upload-context.mjs';
+import { ForbiddenDataError } from '../lib/forbidden-data-guard.mjs';
 import { readStdin } from '../lib/read-stdin.mjs';
 
 const RETRY_MAX = 6;
@@ -61,18 +55,14 @@ async function main() {
   if (!parentSessionId || !agentId || !transcriptPath) process.exit(0);
 
   // The route (and therefore the credential) depends on the working directory,
-  // which the hook payload carries. Resolved here so every later step uses the
-  // right server.
-  const ctx = await resolveUploadContextWithRefresh({
-    source: 'codex',
-    sessionId: parentSessionId,
-    cwd: payload.cwd,
-  });
-  if (!ctx.ok) {
-    process.stderr.write(`agentboard-codex-subagent: ${ctx.reason}\n`);
+  // which the hook payload carries, and on the PARENT session's pin — the
+  // subagent's tokens belong wherever the parent's go. Resolved here so every
+  // later step uses the right server.
+  const plan = resolveUploadPlan({ source: 'codex', sessionId: parentSessionId, cwd: payload.cwd });
+  if (!plan.ok) {
+    process.stderr.write(`agentboard-codex-subagent: ${plan.reason}\n`);
     process.exit(0);
   }
-  const { deviceId, route } = ctx;
 
   // The child rollout may still be flushing when the hook fires — retry like
   // notify.mjs does for the parent session file.
@@ -84,45 +74,37 @@ async function main() {
   }
   if (!parsed || parsed.totalTokens <= 0) process.exit(0);
 
-  // Dedup is keyed on the SUBAGENT (a subagent can, in principle, report more
-  // than once), but the event is uploaded under the PARENT session id so the
-  // tokens roll into that session's total rather than spawning a phantom
-  // session. `sub:` prefix keeps the ledger key from ever colliding with a real
-  // codex session id.
-  const ledgerKey = `sub:${agentId}`;
-  const alreadySent = getSentTotals('codex', ledgerKey);
-  // Split per calendar day, from the CHILD rollout's own timestamps — a
-  // long-running subagent that crosses midnight splits like any other session.
-  const pieces = splitSessionDelta(parsed, alreadySent);
-  if (pieces.length === 0) process.exit(0);
-
-  // Uploaded under the PARENT session id so the subagent's tokens roll into
-  // that session rather than spawning a phantom one.
-  const events = pieces.map((piece) =>
-    buildUsageEvent(deviceId, parentSessionId, parsed.model, piece, alreadySent)
-  );
-
   try {
-    for (const event of events) assertNoForbiddenFields(event);
-  } catch (err) {
-    process.stderr.write(
-      `agentboard-codex-subagent: forbidden field detected, upload aborted: ${err.message}\n`
-    );
-    process.exit(1);
-  }
-
-  try {
-    const verdict = await uploadWithContext(ctx, events);
+    // Dedup is keyed on the SUBAGENT (a subagent can, in principle, report
+    // more than once), but the events are uploaded under the PARENT session id
+    // so the tokens roll into that session's total rather than spawning a
+    // phantom session. `sub:` prefix keeps the ledger key from ever colliding
+    // with a real codex session id. The split per calendar day (and at the
+    // connection, for a hand-off) uses the CHILD rollout's own timestamps — a
+    // long-running subagent that crosses midnight splits like any other
+    // session.
+    const outcome = await uploadSessionDelta(plan, {
+      source: 'codex',
+      ledgerKey: `sub:${agentId}`,
+      parsed,
+      buildEvent: (deviceId, piece, watermark) =>
+        buildUsageEvent(deviceId, parentSessionId, parsed.model, piece, watermark),
+    });
 
     // A 2xx does not mean every event landed — the server reports per-event
     // rejections inside the body. Advancing the ledger past something the
     // server might still accept loses those tokens for good.
-    if (verdict && !verdict.canAdvanceLedger) {
+    if (outcome.status === 'held') {
       process.stderr.write('agentboard: server rejected this upload; it will be retried.\n');
       process.exit(1);
     }
-    markTotalsSent('codex', ledgerKey, parsed, route.routeId);
   } catch (err) {
+    if (err instanceof ForbiddenDataError) {
+      process.stderr.write(
+        `agentboard-codex-subagent: forbidden field detected, upload aborted: ${err.message}\n`
+      );
+      process.exit(1);
+    }
     if (isRevokedDeviceError(err)) {
       process.stderr.write(revokedDeviceMessage('agentboard-codex-subagent'));
       process.exit(1);

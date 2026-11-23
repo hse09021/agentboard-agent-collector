@@ -18,12 +18,13 @@ import { generateEventId, deriveEventId, COLLECTOR_VERSION } from '../lib/config
 // file these tokens under the day they were actually spent rather than under
 // the thread's creation date — a thread started yesterday and resumed today
 // used to report all of today's tokens with yesterday's `started_at`.
-export function buildUsageEvent(deviceId, sessionId, model, piece, alreadySent) {
+// `watermark` is the ledger value the piece was computed against.
+export function buildUsageEvent(deviceId, sessionId, model, piece, watermark) {
   return {
     schema_version: '1.0',
     // Deterministic, so the server's (user_id, event_id) uniqueness can absorb
     // a racing notify or a retry after an ambiguous failure. See deriveEventId.
-    event_id: deriveEventId('codex', sessionId, piece, alreadySent),
+    event_id: deriveEventId('codex', sessionId, piece, watermark),
     device_id: deviceId,
     source: 'codex',
     model,

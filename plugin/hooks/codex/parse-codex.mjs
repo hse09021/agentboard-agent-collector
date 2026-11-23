@@ -261,6 +261,7 @@ export function parseCodexFiles(filePaths) {
   // Per-day buckets so a thread resumed on a later day reports that day's
   // tokens under that day, not under the thread's creation date.
   const dayBuckets = new Map();
+  const entries = [];
 
   for (const page of pages) {
     if (!model && page.model) model = page.model;
@@ -274,6 +275,7 @@ export function parseCodexFiles(filePaths) {
       outputTokens += call.turn.outputTokens;
       cacheReadTokens += call.turn.cacheReadTokens;
       addToDayBucket(dayBuckets, call.ts, call.turn);
+      entries.push({ ts: call.ts, turn: call.turn });
     }
   }
 
@@ -293,6 +295,9 @@ export function parseCodexFiles(filePaths) {
     cacheReadTokens,
     totalTokens,
     byDate: sortDayBuckets(dayBuckets),
+    // One entry per API call, for splitting the thread at an instant (a
+    // directory connected mid-thread). Counts and timestamps only.
+    entries,
   };
 }
 

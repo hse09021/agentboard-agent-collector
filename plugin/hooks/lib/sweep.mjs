@@ -44,7 +44,6 @@ import {
   deriveEventId,
   getSentTotals,
   markTotalsSeeded,
-  markTotalsSentMonotonic,
   upgradeLineCountedTotals,
   acquireSessionLock,
   releaseSessionLock,
@@ -60,8 +59,7 @@ import {
 import { loadScanCache, saveScanCache, isUnchanged, rememberScan, getCacheEntry } from './scan-cache.mjs';
 import { splitSessionDelta } from './daily-split.mjs';
 import { uploadEvents } from './transport.mjs';
-import { resolveUploadContextWithRefresh, uploadWithContext } from './upload-context.mjs';
-import { assertNoForbiddenFields } from './forbidden-data-guard.mjs';
+import { resolveUploadPlan, uploadSessionDelta, uploadWithContext } from './upload-context.mjs';
 import { parseClaudeSession, convertLineCountedWatermark } from '../claude/parse-claude.mjs';
 import { findCodexSessionFiles, parseCodexFiles } from '../codex/parse-codex.mjs';
 
@@ -315,13 +313,13 @@ function sortByMtimeDesc(candidates) {
 
 // ─── Event building ───────────────────────────────────────────────────────────
 
-function buildUsageEvent(source, deviceId, sessionId, model, piece, alreadySent) {
+function buildUsageEvent(source, deviceId, sessionId, model, piece, watermark) {
   return {
     schema_version: '1.0',
     // Deterministic: a sweep and a direct hook that both reach the same session
     // with the same ledger watermark produce the same id, so the server's
     // (user_id, event_id) uniqueness collapses them into one accepted event.
-    event_id: deriveEventId(source, sessionId, piece, alreadySent),
+    event_id: deriveEventId(source, sessionId, piece, watermark),
     device_id: deviceId,
     source,
     model,
@@ -418,33 +416,41 @@ export async function sweepOneSession(candidate, ctx = {}) {
       return { status: 'seeded', sessionId };
     }
 
-    const alreadySent = getSentTotals(source, sessionId);
-    const pieces = splitSessionDelta(parsed, alreadySent);
-    if (pieces.length === 0) return { status: 'nodelta', sessionId };
+    // Checked before the route is resolved, so a session with nothing new
+    // never costs a token refresh. A hand-off only divides this delta between
+    // two servers; it never adds to it.
+    if (splitSessionDelta(parsed, getSentTotals(source, sessionId)).length === 0) {
+      return { status: 'nodelta', sessionId };
+    }
 
     // Guardrail 4.
-    const uploadCtx = await resolveUploadContextWithRefresh({ source, sessionId, cwd: parsed.cwd });
-    if (!uploadCtx.ok) {
-      return { status: /credential/.test(uploadCtx.reason) ? 'nocred' : 'noroute', sessionId };
+    const plan = resolveUploadPlan({ source, sessionId, cwd: parsed.cwd });
+    if (!plan.ok) {
+      return { status: /credential/.test(plan.reason) ? 'nocred' : 'noroute', sessionId };
     }
-    const { deviceId, route } = uploadCtx;
 
-    const events = pieces.map((piece) =>
-      buildUsageEvent(source, deviceId, sessionId, parsed.model, piece, alreadySent)
-    );
-    for (const event of events) assertNoForbiddenFields(event);
-
-    const verdict = await uploadWithContext(uploadCtx, events, () => {}, uploader);
-    if (verdict && !verdict.canAdvanceLedger) {
+    // Recorded with markTotalsSentMonotonic: see its note on backfilled copies.
+    const outcome = await uploadSessionDelta(plan, {
+      source,
+      ledgerKey: sessionId,
+      parsed,
+      buildEvent: (deviceId, piece, watermark) =>
+        buildUsageEvent(source, deviceId, sessionId, parsed.model, piece, watermark),
+      monotonic: true,
+      upload: (uploadCtx, events) => uploadWithContext(uploadCtx, events, () => {}, uploader),
+    });
+    if (outcome.status === 'held') {
       return { status: 'error', sessionId, error: 'server rejected retriably' };
     }
+    if (outcome.uploads.length === 0) {
+      return { status: 'nocred', sessionId };
+    }
 
-    markTotalsSentMonotonic(source, sessionId, parsed, route.routeId);
     return {
       status: 'uploaded',
       sessionId,
-      routeId: route.routeId,
-      tokens: events.reduce((n, e) => n + e.total_tokens, 0),
+      routeId: outcome.uploads[outcome.uploads.length - 1].routeId,
+      tokens: outcome.tokens,
     };
   } finally {
     releaseSessionLock(source, sessionId);
