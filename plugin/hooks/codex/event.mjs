@@ -8,6 +8,7 @@
  */
 
 import { generateEventId, deriveEventId, COLLECTOR_VERSION } from '../lib/config.mjs';
+import { bucketEventFields } from '../lib/usage-buckets.mjs';
 
 // A codex UsageEvent carrying one calendar day's slice of a token delta. Used
 // for per-turn notify uploads, the SessionEnd residue sweep, and subagent-stop
@@ -18,7 +19,9 @@ import { generateEventId, deriveEventId, COLLECTOR_VERSION } from '../lib/config
 // file these tokens under the day they were actually spent rather than under
 // the thread's creation date — a thread started yesterday and resumed today
 // used to report all of today's tokens with yesterday's `started_at`.
-// `watermark` is the ledger value the piece was computed against.
+// One event per bucket key and day: `piece.key` is the model the calls ran on
+// and their prompt-size tier, and `watermark` that key's ledger value the
+// piece was computed against.
 export function buildUsageEvent(deviceId, sessionId, model, piece, watermark) {
   return {
     schema_version: '1.0',
@@ -27,13 +30,16 @@ export function buildUsageEvent(deviceId, sessionId, model, piece, watermark) {
     event_id: deriveEventId('codex', sessionId, piece, watermark),
     device_id: deviceId,
     source: 'codex',
-    model,
+    ...bucketEventFields(piece.key, model),
     session_id: sessionId,
     started_at: piece.startedAt,
     ended_at: piece.endedAt ?? piece.startedAt,
     input_tokens: piece.inputTokens,
     output_tokens: piece.outputTokens,
     cache_read_tokens: piece.cacheReadTokens,
+    // Not part of total_tokens, and not subtracted from input_tokens: whether
+    // Codex's input already includes it is not known (see daily-split).
+    cache_write_input_tokens: piece.cacheWriteInputTokens ?? 0,
     total_tokens: piece.totalTokens,
     collector_version: COLLECTOR_VERSION,
   };

@@ -332,3 +332,37 @@ describe('parseCodexFile — per-day buckets', () => {
     expect(result.inputTokens).toBe(1700);
   });
 });
+
+// #19: each call is priced as the model its turn ran on.
+describe('parseCodexFile — bucket key per call', () => {
+  const turnContext = (model, ts) => ({ type: 'turn_context', timestamp: ts, payload: { model } });
+
+  it('takes the model from the turn_context before each call', () => {
+    const file = writeTmpJsonl('switch.jsonl', [
+      { type: 'session_meta', timestamp: '2026-11-20T10:00:00.000Z', payload: { id: 't1' } },
+      turnContext('gpt-6.2-sol', '2026-11-20T10:00:00.000Z'),
+      tokenCountEvent({ input_tokens: 1_000, output_tokens: 10 }, '2026-11-20T10:01:00.000Z'),
+      turnContext('gpt-6-astra', '2026-11-20T10:02:00.000Z'),
+      tokenCountEvent({ input_tokens: 300_000, cached_input_tokens: 200_000, output_tokens: 20 }, '2026-11-20T10:03:00.000Z'),
+    ]);
+    const result = parseCodexFile(file);
+    expect(result.model).toBe('gpt-6.2-sol');
+    expect(result.entries.map((e) => e.key)).toEqual([
+      { model: 'gpt-6.2-sol', speed: 'standard', contextSizeBucket: 'up_to_100k', inferenceGeo: null },
+      // The tier is judged on the full input, cached part included.
+      { model: 'gpt-6-astra', speed: 'standard', contextSizeBucket: 'over_272k', inferenceGeo: null },
+    ]);
+  });
+
+  it('carries cache writes apart from input and the total', () => {
+    const file = writeTmpJsonl('cache-write.jsonl', [
+      sessionMeta('gpt-6.2-sol'),
+      tokenCountEvent({ input_tokens: 1_000, cached_input_tokens: 400, cache_write_input_tokens: 300, output_tokens: 10 }),
+    ]);
+    const result = parseCodexFile(file);
+    expect(result.cacheWriteInputTokens).toBe(300);
+    expect(result.inputTokens).toBe(600);
+    expect(result.totalTokens).toBe(600 + 400 + 10);
+    expect(result.entries[0].turn.cacheWriteInputTokens).toBe(300);
+  });
+});

@@ -34,13 +34,15 @@ afterEach(() => {
 
 // cacheCreation5m/1h are a TTL breakdown of cacheCreationTokens (priced 1.25x
 // and 2x input), carried through the ledger but never part of totalTokens.
-const totals = (i, o, c, cc = 0, cc5 = 0, cc1h = 0) => ({
+// cacheWriteInputTokens (Codex's cache writes) is likewise carried apart.
+const totals = (i, o, c, cc = 0, cc5 = 0, cc1h = 0, cw = 0) => ({
   inputTokens: i,
   outputTokens: o,
   cacheCreationTokens: cc,
   cacheCreation5mTokens: cc5,
   cacheCreation1hTokens: cc1h,
   cacheReadTokens: c,
+  cacheWriteInputTokens: cw,
   totalTokens: i + o + c + cc,
 });
 

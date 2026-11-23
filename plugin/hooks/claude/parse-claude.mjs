@@ -9,6 +9,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { TOKEN_FIELDS, addToDayBucket, sortDayBuckets } from '../lib/daily-split.mjs';
+import { contextSizeBucket, makeBucketKey } from '../lib/usage-buckets.mjs';
 
 function toNN(v) {
   const n = typeof v === 'number' ? v : Number(v);
@@ -99,14 +100,29 @@ function readTranscriptFile(filePath) {
     turn.totalTokens =
       turn.inputTokens + turn.outputTokens + turn.cacheCreationTokens + turn.cacheReadTokens;
 
+    // What this response is priced as (usage-buckets.mjs): its own model —
+    // a subagent or a background call can run on a different one — its speed
+    // (fast mode bills at a multiple), the price tier its prompt size falls in
+    // (input + cache reads + cache writes, Anthropic's definition), and where
+    // it was served.
+    const key = makeBucketKey({
+      model: msgModel,
+      speed: usage.speed,
+      contextSizeBucket: contextSizeBucket(
+        turn.inputTokens + turn.cacheReadTokens + turn.cacheCreationTokens
+      ),
+      inferenceGeo: usage.inference_geo,
+    });
+
     usageLines.push({
       // A line with no message id (very old transcripts) cannot be grouped, so
       // it stands alone.
-      key: msg.id ? `${msg.id}:${parsed.requestId ?? ''}` : `${filePath}:${i}`,
+      responseId: msg.id ? `${msg.id}:${parsed.requestId ?? ''}` : `${filePath}:${i}`,
       // An entry without its own timestamp falls back to the last one seen, so
       // it lands on the day it was actually written rather than being dropped.
       ts: ts ?? lastSeenTs ?? startedAt ?? new Date().toISOString(),
       turn,
+      key,
     });
   }
 
@@ -140,7 +156,7 @@ function readSessionFiles(transcriptPath) {
  */
 function uniqueResponses(usageLines) {
   const responses = new Map();
-  for (const line of usageLines) responses.set(line.key, line);
+  for (const line of usageLines) responses.set(line.responseId, line);
   return [...responses.values()];
 }
 
@@ -189,9 +205,11 @@ export function parseClaudeSession(transcriptPath) {
     startedAt: startedAt ?? new Date().toISOString(),
     endedAt,
     byDate,
-    // One entry per API response, for splitting the session at an instant
-    // (a directory connected mid-session). Counts and timestamps only.
-    entries: responses.map(({ ts, turn }) => ({ ts, turn })),
+    // One entry per API response: what it used, when, and what it is priced
+    // as. The upload sums these per bucket key and day, and cuts them at an
+    // instant when a directory is connected mid-session. Counts, timestamps
+    // and model metadata only.
+    entries: responses.map(({ ts, turn, key }) => ({ ts, turn, key })),
   };
 }
 

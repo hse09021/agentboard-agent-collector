@@ -506,3 +506,49 @@ describe('convertLineCountedWatermark — ledger records from line-counting coll
     expect(convertLineCountedWatermark(join(tmpDir, 'gone.jsonl'), { totalTokens: 500 })).toBeNull();
   });
 });
+
+// #19: each response is priced as what it actually was. A subagent or a
+// background call can run on another model, fast mode bills at a multiple, and
+// some models price a long prompt differently.
+describe('parseClaudeSession — bucket key per response', () => {
+  function response(id, model, usage, ts) {
+    return {
+      type: 'assistant',
+      timestamp: ts,
+      requestId: `req_${id}`,
+      message: { id: `msg_${id}`, model, stop_reason: 'end_turn', usage },
+    };
+  }
+
+  it('keys every response by its own model, speed, prompt-size tier and geo', () => {
+    const parent = writeTmpJsonl('bucketed.jsonl', [
+      response('a', 'claude-opus-5-5', { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 150_000, speed: 'standard', inference_geo: 'global' }, '2026-11-20T10:00:00.000Z'),
+      response('b', 'claude-opus-5-5', { input_tokens: 10, output_tokens: 5, speed: 'fast', inference_geo: 'us' }, '2026-11-20T10:01:00.000Z'),
+    ]);
+    mkdirSync(join(tmpDir, 'bucketed', 'subagents'), { recursive: true });
+    writeFileSync(
+      join(tmpDir, 'bucketed', 'subagents', 'agent-1.jsonl'),
+      JSON.stringify(response('c', 'claude-haiku-5-5', { input_tokens: 99_000, cache_creation_input_tokens: 1_000, output_tokens: 1 }, '2026-11-20T10:02:00.000Z')) + '\n'
+    );
+
+    const keys = parseClaudeSession(parent).entries.map((e) => e.key);
+    expect(keys).toEqual([
+      { model: 'claude-opus-5-5', speed: 'standard', contextSizeBucket: 'up_to_272k', inferenceGeo: 'global' },
+      { model: 'claude-opus-5-5', speed: 'fast', contextSizeBucket: 'up_to_100k', inferenceGeo: 'us' },
+      // input + cache writes = 100,000 exactly: still the lower tier.
+      { model: 'claude-haiku-5-5', speed: 'standard', contextSizeBucket: 'up_to_100k', inferenceGeo: null },
+    ]);
+  });
+
+  it('keeps one entry per response, however many lines it was written as', () => {
+    const usage = { input_tokens: 10, output_tokens: 5, speed: 'standard' };
+    const file = writeTmpJsonl('blocks.jsonl', [
+      response('a', 'claude-opus-5-5', usage, '2026-11-20T10:00:00.000Z'),
+      response('a', 'claude-opus-5-5', usage, '2026-11-20T10:00:00.000Z'),
+      response('a', 'claude-opus-5-5', usage, '2026-11-20T10:00:01.000Z'),
+    ]);
+    const result = parseClaudeSession(file);
+    expect(result.entries).toHaveLength(1);
+    expect(result.totalTokens).toBe(15);
+  });
+});

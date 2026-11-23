@@ -62,6 +62,7 @@ import { isRevokedDeviceError, revokedDeviceMessage } from '../lib/revoked.mjs';
 import { ForbiddenDataError } from '../lib/forbidden-data-guard.mjs';
 import { parseClaudeSession, convertLineCountedWatermark } from './parse-claude.mjs';
 import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
+import { bucketEventFields } from '../lib/usage-buckets.mjs';
 
 // ─── Source detection ─────────────────────────────────────────────────────────
 
@@ -84,10 +85,13 @@ function detectSource(payload) {
 
 // ─── UsageEvent builder ───────────────────────────────────────────────────────
 
-// One event per calendar day of the delta. `piece.startedAt` falls inside
-// `piece.date`, which is what makes the server file these tokens under the day
-// they were actually spent rather than under the session's creation date.
-// `watermark` is the ledger value this piece was computed against.
+// One event per bucket key and calendar day of the delta. `piece.startedAt`
+// falls inside `piece.date`, which is what makes the server file these tokens
+// under the day they were actually spent rather than under the session's
+// creation date. `piece.key` says what the tokens are priced as — the model
+// that actually served them, its speed and prompt-size tier — so a Haiku
+// subagent inside an Opus session is no longer billed as Opus. `watermark` is
+// that key's ledger value this piece was computed against.
 function buildUsageEvent(deviceId, source, sessionId, model, piece, watermark) {
   return {
     schema_version: '1.0',
@@ -96,7 +100,7 @@ function buildUsageEvent(deviceId, source, sessionId, model, piece, watermark) {
     event_id: deriveEventId(source, sessionId, piece, watermark),
     device_id: deviceId,
     source,
-    model,
+    ...bucketEventFields(piece.key, model),
     session_id: sessionId,
     started_at: piece.startedAt,
     ended_at: piece.endedAt ?? piece.startedAt,

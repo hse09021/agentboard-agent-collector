@@ -14,7 +14,7 @@ import {
   loadConfigV2,
   loadRouteCredential,
   getSentRoute,
-  getSentTotals,
+  getSentRecord,
   markTotalsSent,
   markTotalsSentMonotonic,
 } from './config.mjs';
@@ -23,7 +23,8 @@ import { ensureFreshToken } from './token-refresh.mjs';
 import { recordAuthFailure } from './auth-failure.mjs';
 import { ensureFreshProjectCredential } from './project-credential.mjs';
 import { uploadEvents } from './transport.mjs';
-import { splitSessionDelta, splitHandoffDelta, sumPieceTokens } from './daily-split.mjs';
+import { allocateWatermarkByTime, splitBucketedDelta, sumByKey, sumPieceTokens } from './daily-split.mjs';
+import { bucketKeyString, makeBucketKey } from './usage-buckets.mjs';
 import { assertNoForbiddenFields, sanitizeRawOutput } from './forbidden-data-guard.mjs';
 
 /**
@@ -226,39 +227,48 @@ export async function uploadWithContext(context, events, log = () => {}, uploade
  *
  * Ordinarily one leg: the whole delta to the plan's route. A hand-off has two,
  * the pre-connect tail to the community server first and the rest to the
- * organization's (see splitHandoffDelta). Each leg carries the watermark its
- * event ids derive from and the ledger value to record once it lands, which is
- * what makes a retry after a partial failure recompute exactly the same thing:
- * after the first leg the ledger sits at `max(alreadySent, before)` on the
- * default route, so the next attempt has no tail left and an identical second
- * leg, ids included.
+ * organization's (see splitBucketedDelta). Each leg carries, per bucket key,
+ * the watermark its event ids derive from, and the ledger to record once it
+ * lands. That is what makes a retry after a partial failure recompute exactly
+ * the same thing: after the first leg each key sits at `max(sent, before)` on
+ * the default route, so the next attempt has no tail left and an identical
+ * second leg, ids included.
  */
-function planLegs(plan, parsed, alreadySent) {
-  if (!parsed) return [{ route: plan.route, pieces: [], watermark: alreadySent, record: null, primary: true }];
+function planLegs(plan, parsed, sentByKey) {
+  if (!parsed) return [{ route: plan.route, pieces: [], watermarks: {}, record: null, primary: true }];
 
-  if (plan.kind !== 'handoff') {
-    return [
-      {
-        route: plan.route,
-        pieces: splitSessionDelta(parsed, alreadySent),
-        watermark: alreadySent,
-        record: parsed,
-        primary: true,
-      },
-    ];
+  const { earlier, later } = splitBucketedDelta(
+    parsed,
+    sentByKey,
+    plan.kind === 'handoff' ? plan.splitAt : null
+  );
+  const legs = [];
+  if (earlier) legs.push({ route: plan.from, ...earlier, primary: false });
+  legs.push({ route: plan.route, ...later, primary: true });
+  return legs;
+}
+
+/**
+ * The ledger's per-key watermarks. A record from before #19 holds one flat
+ * total; it is spread over this session's keys by time (the tokens it covered
+ * were the earliest), and stored per key by the next upload.
+ */
+function sentByBucket(record, parsed, log) {
+  if (record.buckets) return record.buckets;
+  if (Array.isArray(parsed?.entries)) {
+    const byKey = allocateWatermarkByTime(parsed.entries, record.totals);
+    if (record.totals.totalTokens > 0) {
+      log(`ledger spread over ${Object.keys(byKey).length} bucket key(s) by time (was flat)`);
+    }
+    return byKey;
   }
-
-  const { earlier, later } = splitHandoffDelta(parsed, alreadySent, plan.splitAt);
-  return [
-    { route: plan.from, pieces: earlier.pieces, watermark: earlier.watermark, record: earlier.sentAfter, primary: false },
-    { route: plan.route, pieces: later.pieces, watermark: later.watermark, record: parsed, primary: true },
-  ];
+  return { [bucketKeyString(makeBucketKey({ model: parsed?.model }))]: record.totals };
 }
 
 function describePieces(pieces) {
   return (
-    `${sumPieceTokens(pieces)} across ${pieces.length} day(s) ` +
-    `[${pieces.map((p) => `${p.date}:${p.totalTokens}`).join(' ')}]`
+    `${sumPieceTokens(pieces)} in ${pieces.length} piece(s) ` +
+    `[${pieces.map((p) => `${p.date}/${p.key?.model ?? '?'}:${p.totalTokens}`).join(' ')}]`
   );
 }
 
@@ -268,7 +278,8 @@ function describePieces(pieces) {
  * The caller must already hold the session lock where it takes one: the
  * ledger is read here, and a second reader would compute an overlapping delta.
  *
- * Steps: read the ledger, split the delta into legs (planLegs), resolve each
+ * Steps: read the ledger, split the delta into legs (planLegs) — per bucket
+ * key and day, and at the connection for a hand-off — resolve each
  * leg's credential (refreshing it if due), build every event and run the
  * privacy guard over all of them, then upload leg by leg, recording each one
  * in the ledger as soon as it lands. Nothing is uploaded if the guard rejects
@@ -294,6 +305,8 @@ function describePieces(pieces) {
  *   session id, or `sub:<agentId>` for a Codex subagent)
  * @param {object|null} opts.parsed - cumulative parse result
  * @param {(deviceId: string, piece: object, watermark: object) => object} opts.buildEvent
+ *   one event per piece; `piece.key` is its bucket key and `watermark` that
+ *   key's ledger value
  * @param {object|null} [opts.snapshot] - usage-limit snapshot
  * @param {(deviceId: string) => object} [opts.buildSnapshotOnlyEvent]
  * @param {boolean} [opts.monotonic] - record with markTotalsSentMonotonic (the sweep)
@@ -320,19 +333,20 @@ export async function uploadSessionDelta(plan, opts) {
   const upload = opts.upload ?? ((ctx, events) => uploadWithContext(ctx, events, log));
   const record = monotonic ? markTotalsSentMonotonic : markTotalsSent;
 
-  const alreadySent = getSentTotals(source, ledgerKey);
-  const legs = planLegs(plan, parsed, alreadySent);
+  const sentRecord = getSentRecord(source, ledgerKey);
+  const legs = planLegs(plan, parsed, parsed ? sentByBucket(sentRecord, parsed, log) : {});
+  const alreadySent = sentRecord.totals.totalTokens;
 
-  if (plan.kind === 'handoff') {
+  if (plan.kind === 'handoff' && parsed) {
     log(
       `handoff at ${plan.splitAt}: ${legs[0].route.routeId} ${describePieces(legs[0].pieces)}, ` +
         `${legs[1].route.routeId} ${describePieces(legs[1].pieces)} ` +
-        `(cumulative=${parsed?.totalTokens ?? 0}, alreadySent=${alreadySent.totalTokens})`
+        `(cumulative=${parsed.totalTokens}, alreadySent=${alreadySent})`
     );
   } else if (parsed) {
     log(
       `delta totalTokens=${describePieces(legs[0].pieces)} ` +
-        `(cumulative=${parsed.totalTokens}, alreadySent=${alreadySent.totalTokens})`
+        `(cumulative=${parsed.totalTokens}, alreadySent=${alreadySent})`
     );
   }
 
@@ -356,7 +370,7 @@ export async function uploadSessionDelta(plan, opts) {
 
     const events =
       leg.pieces.length > 0
-        ? leg.pieces.map((piece) => buildEvent(ctx.deviceId, piece, leg.watermark))
+        ? leg.pieces.map((piece) => buildEvent(ctx.deviceId, piece, leg.watermarks[piece.keyString]))
         : [buildSnapshotOnlyEvent(ctx.deviceId)];
     // A point-in-time reading of the account's rate limits, not per-day data —
     // the most recent event only, never each.
@@ -406,7 +420,7 @@ export async function uploadSessionDelta(plan, opts) {
     // hand-off's second leg the session is pinned to the organization, and the
     // hand-off is over.
     if (leg.pieces.length > 0) {
-      record(source, ledgerKey, leg.record, leg.route.routeId);
+      record(source, ledgerKey, sumByKey(leg.record), leg.route.routeId, leg.record);
       result.tokens += tokens;
     }
     result.status = 'sent';

@@ -10,7 +10,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { splitHandoffDelta, TOKEN_FIELDS } from '../../plugin/hooks/lib/daily-split.mjs';
+import { splitBucketedDelta, TOKEN_FIELDS } from '../../plugin/hooks/lib/daily-split.mjs';
+import { bucketKeyString } from '../../plugin/hooks/lib/usage-buckets.mjs';
 
 function turn(input, output, cacheCreation = 0, cacheRead = 0) {
   return {
@@ -20,20 +21,34 @@ function turn(input, output, cacheCreation = 0, cacheRead = 0) {
     cacheCreation5mTokens: 0,
     cacheCreation1hTokens: 0,
     cacheReadTokens: cacheRead,
+    cacheWriteInputTokens: 0,
     totalTokens: input + output + cacheCreation + cacheRead,
   };
 }
 
+// One bucket key throughout: per-key behaviour is covered in usage-buckets.
+const KEY = { model: 'claude-opus-5-5', speed: 'standard', contextSizeBucket: 'up_to_100k' };
+const KS = bucketKeyString(KEY);
+
 function session(entries) {
   const totals = Object.fromEntries(TOKEN_FIELDS.map((f) => [f, 0]));
   for (const { turn: t } of entries) for (const f of TOKEN_FIELDS) totals[f] += t[f];
-  return { ...totals, entries };
+  return { ...totals, model: KEY.model, entries: entries.map((e) => ({ ...e, key: KEY })) };
+}
+
+// The single-key view of splitBucketedDelta.
+function splitHandoffDelta(parsed, alreadySent, splitAt) {
+  const { earlier, later } = splitBucketedDelta(parsed, { [KS]: alreadySent }, splitAt);
+  return {
+    earlier: { pieces: earlier.pieces, watermark: earlier.watermarks[KS], sentAfter: earlier.record[KS] },
+    later: { pieces: later.pieces, watermark: later.watermarks[KS] },
+  };
 }
 
 const zero = turn(0, 0);
 const sum = (pieces, field = 'totalTokens') => pieces.reduce((n, p) => n + p[field], 0);
 
-describe('splitHandoffDelta', () => {
+describe('splitBucketedDelta at a connection', () => {
   const CONNECTED = '2026-11-20T12:00:00.000Z';
 
   const parsed = session([
@@ -109,12 +124,13 @@ describe('splitHandoffDelta', () => {
 
   it('treats a session without per-response entries as entirely post-connect', () => {
     const { entries, ...flat } = parsed;
-    const { earlier, later } = splitHandoffDelta(
+    const { earlier, later } = splitBucketedDelta(
       { ...flat, startedAt: '2026-11-20T10:00:00.000Z' },
-      turn(1_000, 100),
+      { [KS]: turn(1_000, 100) },
       CONNECTED
     );
     expect(earlier.pieces).toEqual([]);
     expect(sum(later.pieces)).toBe(parsed.totalTokens - 1_100);
+    expect(later.pieces[0].key.model).toBe(KEY.model);
   });
 });

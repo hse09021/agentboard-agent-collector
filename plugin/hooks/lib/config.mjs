@@ -482,6 +482,8 @@ export function markSessionSent(source, sessionId) {
 // existed simply read as 0, which makes the first post-upgrade delta report the
 // whole split — the server clamps that against cacheCreationTokens rather than
 // trusting it (see cost-estimator).
+// `cacheWriteInputTokens` (Codex's cache writes) is likewise outside
+// totalTokens; records from before it existed read it as 0.
 const ZERO_TOTALS = {
   inputTokens: 0,
   outputTokens: 0,
@@ -489,8 +491,11 @@ const ZERO_TOTALS = {
   cacheCreation5mTokens: 0,
   cacheCreation1hTokens: 0,
   cacheReadTokens: 0,
+  cacheWriteInputTokens: 0,
   totalTokens: 0,
 };
+
+const TOTAL_FIELDS = Object.keys(ZERO_TOTALS);
 
 function normalizeTotals(totals) {
   if (!totals || typeof totals !== 'object') return { ...ZERO_TOTALS };
@@ -498,15 +503,20 @@ function normalizeTotals(totals) {
     const n = typeof v === 'number' ? v : Number(v);
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
   };
-  return {
-    inputTokens: nn(totals.inputTokens),
-    outputTokens: nn(totals.outputTokens),
-    cacheCreationTokens: nn(totals.cacheCreationTokens),
-    cacheCreation5mTokens: nn(totals.cacheCreation5mTokens),
-    cacheCreation1hTokens: nn(totals.cacheCreation1hTokens),
-    cacheReadTokens: nn(totals.cacheReadTokens),
-    totalTokens: nn(totals.totalTokens),
-  };
+  return Object.fromEntries(TOTAL_FIELDS.map((field) => [field, nn(totals[field])]));
+}
+
+// Per bucket key (usage-buckets.mjs): what each model / speed / prompt-size
+// tier of the session has uploaded. Null for a record written before #19,
+// which holds only the flat `totals`; uploadSessionDelta spreads that over the
+// keys by time and the next upload stores the result.
+function normalizeBuckets(buckets) {
+  if (!buckets || typeof buckets !== 'object' || Array.isArray(buckets)) return null;
+  return Object.fromEntries(Object.entries(buckets).map(([key, totals]) => [key, normalizeTotals(totals)]));
+}
+
+function maxTotals(a, b) {
+  return Object.fromEntries(TOTAL_FIELDS.map((field) => [field, Math.max(a[field], b[field])]));
 }
 
 // Claude Code records carry this once their totals count each API response
@@ -527,6 +537,17 @@ export function getSentTotals(source, sessionId) {
   const sent = loadHookSent();
   const record = sent[hookSentKey(source, sessionId)];
   return normalizeTotals(record?.totals);
+}
+
+/**
+ * A session's ledger record: the flat `totals` and, once written by #19 or
+ * later, the per-bucket-key `buckets` (null before that).
+ *
+ * @returns {{totals: object, buckets: Record<string, object>|null}}
+ */
+export function getSentRecord(source, sessionId) {
+  const record = loadHookSent()[hookSentKey(source, sessionId)];
+  return { totals: normalizeTotals(record?.totals), buckets: normalizeBuckets(record?.buckets) };
 }
 
 /**
@@ -562,14 +583,21 @@ export function getSentRoute(source, sessionId) {
  *
  * `route` pins the session (see getSentRoute). Passing undefined keeps whatever
  * pin is already recorded rather than clearing it.
+ *
+ * `buckets` is the per-bucket-key breakdown of `totals`. `totals` is still
+ * written: it is what a collector from before #19 reads if the user
+ * downgrades, and what the session-level checks (SessionEnd's "has notify
+ * reported this session") use.
  */
-export function markTotalsSent(source, sessionId, totals, route) {
+export function markTotalsSent(source, sessionId, totals, route, buckets) {
   const sent = loadHookSent();
   const key = hookSentKey(source, sessionId);
   const previous = sent[key];
+  const byKey = normalizeBuckets(buckets);
   sent[key] = {
     sentAt: new Date().toISOString(),
     totals: normalizeTotals(totals),
+    ...(byKey ? { buckets: byKey } : {}),
     ...countingMarker(source),
     ...(route ?? previous?.route ? { route: route ?? previous.route } : {}),
   };
@@ -616,24 +644,28 @@ export function markTotalsSeeded(source, sessionId, totals) {
  * correct reading. Scoped to the sweep; the direct hooks keep using
  * markTotalsSent, where there is exactly one copy and no ambiguity.
  */
-export function markTotalsSentMonotonic(source, sessionId, totals, route) {
+export function markTotalsSentMonotonic(source, sessionId, totals, route, buckets) {
   const sent = loadHookSent();
   const key = hookSentKey(source, sessionId);
   const previous = sent[key];
-  const prior = normalizeTotals(previous?.seeded ? previous.totals : previous?.totals);
+  const prior = normalizeTotals(previous?.totals);
   const next = normalizeTotals(totals);
+
+  // The same rule per bucket key: a key's cumulative never shrinks either.
+  let byKey = normalizeBuckets(buckets);
+  const priorBuckets = normalizeBuckets(previous?.buckets);
+  if (byKey && priorBuckets) {
+    for (const [bucket, totalsForKey] of Object.entries(priorBuckets)) {
+      byKey[bucket] = byKey[bucket] ? maxTotals(byKey[bucket], totalsForKey) : totalsForKey;
+    }
+  } else if (!byKey) {
+    byKey = priorBuckets;
+  }
 
   sent[key] = {
     sentAt: new Date().toISOString(),
-    totals: {
-      inputTokens: Math.max(prior.inputTokens, next.inputTokens),
-      outputTokens: Math.max(prior.outputTokens, next.outputTokens),
-      cacheCreationTokens: Math.max(prior.cacheCreationTokens, next.cacheCreationTokens),
-      cacheCreation5mTokens: Math.max(prior.cacheCreation5mTokens, next.cacheCreation5mTokens),
-      cacheCreation1hTokens: Math.max(prior.cacheCreation1hTokens, next.cacheCreation1hTokens),
-      cacheReadTokens: Math.max(prior.cacheReadTokens, next.cacheReadTokens),
-      totalTokens: Math.max(prior.totalTokens, next.totalTokens),
-    },
+    totals: maxTotals(prior, next),
+    ...(byKey ? { buckets: byKey } : {}),
     ...countingMarker(source),
     ...(route ?? previous?.route ? { route: route ?? previous.route } : {}),
   };
@@ -676,16 +708,7 @@ export function upgradeLineCountedTotals(sessionId, convert) {
 export function computeDelta(cumulative, alreadySent) {
   const cur = normalizeTotals(cumulative);
   const prev = normalizeTotals(alreadySent);
-  const sub = (a, b) => Math.max(0, a - b);
-  return {
-    inputTokens: sub(cur.inputTokens, prev.inputTokens),
-    outputTokens: sub(cur.outputTokens, prev.outputTokens),
-    cacheCreationTokens: sub(cur.cacheCreationTokens, prev.cacheCreationTokens),
-    cacheCreation5mTokens: sub(cur.cacheCreation5mTokens, prev.cacheCreation5mTokens),
-    cacheCreation1hTokens: sub(cur.cacheCreation1hTokens, prev.cacheCreation1hTokens),
-    cacheReadTokens: sub(cur.cacheReadTokens, prev.cacheReadTokens),
-    totalTokens: sub(cur.totalTokens, prev.totalTokens),
-  };
+  return Object.fromEntries(TOTAL_FIELDS.map((field) => [field, Math.max(0, cur[field] - prev[field])]));
 }
 
 // ─── Per-session upload lock ──────────────────────────────────────────────────
@@ -780,6 +803,7 @@ export function generateEventId() {
  *          cacheCreationTokens?: number, cacheReadTokens?: number,
  *          totalTokens?: number}} piece the day-slice being uploaded
  * @param {object} alreadySent cumulative totals this delta was computed against
+ *   (for a keyed piece, that key's own)
  */
 export function deriveEventId(source, sessionId, piece, alreadySent) {
   const sent = normalizeTotals(alreadySent);
@@ -804,7 +828,16 @@ export function deriveEventId(source, sessionId, piece, alreadySent) {
     sent.cacheReadTokens,
     sent.totalTokens,
     ...amounts,
-  ].join('|');
+  ];
 
-  return `evt_${createHash('sha256').update(material).digest('hex').slice(0, 32)}`;
+  // A session now uploads one event per bucket key and day (#19). Two keys on
+  // the same day can carry identical amounts against identical watermarks, so
+  // the key itself is part of the id. `alreadySent` is then that key's own
+  // watermark. A piece without a key keeps the v1 id.
+  if (typeof piece?.keyString === 'string') {
+    material[0] = 'v2';
+    material.push(piece.keyString, Math.floor(piece.cacheWriteInputTokens ?? 0) || 0, sent.cacheWriteInputTokens);
+  }
+
+  return `evt_${createHash('sha256').update(material.join('|')).digest('hex').slice(0, 32)}`;
 }
