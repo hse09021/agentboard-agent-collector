@@ -142,13 +142,17 @@ describe("resolveRoute", () => {
     expect(route).toMatchObject({ routeId: DEFAULT_ROUTE_ID });
   });
 
-  // The single most important privacy behaviour in this module.
+  // The single most important privacy behaviour in this module, now in both
+  // directions.
   //
-  // The ledger holds one cumulative total per session. If a directory is
-  // connected partway through a session and the route were re-derived from cwd,
-  // the organization's server would receive the whole cumulative figure —
-  // including the personal work that happened before the connection.
-  it("keeps a session on its original route after the directory is connected", () => {
+  // The ledger holds one cumulative total per session. Moving a community
+  // session to the organization when its directory is connected would hand
+  // the organization the personal work done before the connection; keeping it
+  // on the community server ships the organization's work there for as long
+  // as the session lives (#17). So the session is handed off at
+  // `connected_at`: the route says where each side goes, and the upload
+  // splits the tokens at that instant (see daily-split's splitHandoffDelta).
+  it("hands a community-pinned session off at the moment its directory was connected", () => {
     const afterConnect = config([binding(api)]);
     const route = resolveRoute({
       config: afterConnect,
@@ -156,8 +160,45 @@ describe("resolveRoute", () => {
       pinnedRouteId: DEFAULT_ROUTE_ID,
     });
 
+    expect(route).toMatchObject({
+      kind: "handoff",
+      splitAt: "2026-09-06T00:00:00.000Z",
+      from: { kind: "send", routeId: DEFAULT_ROUTE_ID, credentialRef: null },
+      to: { kind: "send", routeId: "acme-ref", credentialRef: "acme-ref" },
+    });
+    if (route.kind !== "handoff") return;
+    // Tokens from before the connection only ever go to the community server.
+    expect(route.from.server.api_base_url).toBe(COMMUNITY.api_base_url);
+    expect(route.to.server.api_base_url).toBe(ACME.api_base_url);
+  });
+
+  it("keeps a community-pinned session on the community server outside connected directories", () => {
+    const route = resolveRoute({
+      config: config([binding(api)]),
+      cwd: root,
+      pinnedRouteId: DEFAULT_ROUTE_ID,
+    });
     expect(route).toMatchObject({ kind: "send", routeId: DEFAULT_ROUTE_ID });
-    if (route.kind === "send") expect(route.server.api_base_url).toBe(COMMUNITY.api_base_url);
+  });
+
+  // Without the instant there is nothing to split at; the session stays where
+  // it is rather than handing pre-connect work to the organization.
+  it("does not hand off when the binding has no usable connected_at", () => {
+    const broken = { ...binding(api), connected_at: "not a date" };
+    const route = resolveRoute({
+      config: config([broken]),
+      cwd: api,
+      pinnedRouteId: DEFAULT_ROUTE_ID,
+    });
+    expect(route).toMatchObject({ kind: "send", routeId: DEFAULT_ROUTE_ID });
+  });
+
+  // An unpinned session has no community history to protect, and splitting it
+  // at a reset `connected_at` (a reconnect) would send organization work that
+  // never uploaded under the old connection to the community server.
+  it("routes an unpinned session in a connected directory by cwd alone", () => {
+    const route = resolveRoute({ config: config([binding(api)]), cwd: api, pinnedRouteId: null });
+    expect(route).toMatchObject({ kind: "send", routeId: "acme-ref" });
   });
 
   it("keeps a session pinned to an organization even when cwd moves away", () => {
@@ -183,6 +224,29 @@ describe("resolveRoute", () => {
   it("resolves the default route id to the default server", () => {
     const route = routeForId(config([]), DEFAULT_ROUTE_ID);
     expect(route).toMatchObject({ kind: "send", credentialRef: null });
+  });
+
+  // The hook runtime carries its own copy (plugin/hooks/lib/routing.mjs). If
+  // the two ever disagree, the CLI shows one destination and the hook uses
+  // another.
+  it("agrees with the hook runtime's copy on every branch", async () => {
+    const hook = await import("../../plugin/hooks/lib/routing.mjs");
+    const other = path.join(root, "other");
+    const cases = [
+      { bindings: [], cwd: api, pinnedRouteId: null },
+      { bindings: [binding(api)], cwd: api, pinnedRouteId: null },
+      { bindings: [binding(api)], cwd: api, pinnedRouteId: DEFAULT_ROUTE_ID },
+      { bindings: [binding(api)], cwd: other, pinnedRouteId: DEFAULT_ROUTE_ID },
+      { bindings: [binding(api)], cwd: other, pinnedRouteId: "acme-ref" },
+      { bindings: [binding(api)], cwd: api, pinnedRouteId: "acme-ref" },
+      { bindings: [], cwd: api, pinnedRouteId: "deleted-ref" },
+      { bindings: [{ ...binding(api), connected_at: "" }], cwd: api, pinnedRouteId: DEFAULT_ROUTE_ID },
+      { bindings: [binding(api)], cwd: null, pinnedRouteId: DEFAULT_ROUTE_ID },
+    ];
+    for (const { bindings, ...rest } of cases) {
+      const input = { config: config(bindings), ...rest };
+      expect(hook.resolveRoute(input), JSON.stringify(rest)).toEqual(resolveRoute(input));
+    }
   });
 });
 

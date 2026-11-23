@@ -1,36 +1,51 @@
 /**
  * Resolves everything a hook needs to upload: which server, with which
- * credential, as which device.
+ * credential, as which device — and, for a session handed off mid-flight, which
+ * of its tokens go to which server.
  *
- * Every hook entry point needs the same five steps (load config, read the
- * session's pin, resolve the route, fetch that route's credential, bail out
- * cleanly if anything is missing). Doing it in one place keeps Claude Code and
- * Codex from drifting apart — a divergence there would mean one tool routes
- * correctly and the other quietly ships data to the wrong server.
+ * Every hook entry point needs the same steps (load config, read the session's
+ * pin, resolve the route, fetch that route's credential, compute the delta,
+ * upload, record it). Doing it in one place keeps Claude Code and Codex from
+ * drifting apart — a divergence there would mean one tool routes correctly and
+ * the other quietly ships data to the wrong server.
  */
 
-import { loadConfigV2, loadRouteCredential, getSentRoute } from './config.mjs';
+import {
+  loadConfigV2,
+  loadRouteCredential,
+  getSentRoute,
+  getSentTotals,
+  markTotalsSent,
+  markTotalsSentMonotonic,
+} from './config.mjs';
 import { resolveRoute } from './routing.mjs';
 import { ensureFreshToken } from './token-refresh.mjs';
 import { recordAuthFailure } from './auth-failure.mjs';
 import { ensureFreshProjectCredential } from './project-credential.mjs';
 import { uploadEvents } from './transport.mjs';
+import { splitSessionDelta, splitHandoffDelta, sumPieceTokens } from './daily-split.mjs';
+import { assertNoForbiddenFields, sanitizeRawOutput } from './forbidden-data-guard.mjs';
 
 /**
+ * Where a session's usage goes, decided without touching any credential.
+ *
+ * `route` is where new usage goes. For a hand-off (see resolveRoute) `from` is
+ * the community route that keeps the tokens from before `splitAt`.
+ *
+ * Fails only when nothing could be sent at all: a pinned route that is gone,
+ * or no credential for any route involved.
+ *
  * @param {{source: string, sessionId: string, cwd?: string|null}} input
- * @returns {{
- *   ok: true, route: object, apiBaseUrl: string, deviceId: string,
- *   token: string, config: object, pinnedRoute: string|null
- * } | { ok: false, reason: string }}
+ *   `sessionId` is the session whose pin decides the route
  */
-export function resolveUploadContext({ source, sessionId, cwd }) {
+export function resolveUploadPlan({ source, sessionId, cwd }) {
   const config = loadConfigV2();
   if (!config) return { ok: false, reason: 'no config' };
 
   const pinnedRoute = getSentRoute(source, sessionId);
-  const route = resolveRoute({ config, cwd, pinnedRouteId: pinnedRoute });
+  const resolved = resolveRoute({ config, cwd, pinnedRouteId: pinnedRoute });
 
-  if (route.kind === 'blocked') {
+  if (resolved.kind === 'blocked') {
     // The binding this session was pinned to is gone. Falling back to another
     // server would ship one organization's telemetry somewhere it was never
     // meant to go; the tokens stay in the ledger and are recovered if the
@@ -38,6 +53,25 @@ export function resolveUploadContext({ source, sessionId, cwd }) {
     return { ok: false, reason: `session pinned to a missing route (${pinnedRoute})` };
   }
 
+  const route = resolved.kind === 'handoff' ? resolved.to : resolved;
+  const from = resolved.kind === 'handoff' ? resolved.from : null;
+
+  if (![route, from].some((r) => r && loadRouteCredential(r.credentialRef))) {
+    return { ok: false, reason: `no credential for route ${route.routeId}` };
+  }
+
+  return {
+    ok: true,
+    kind: resolved.kind,
+    config,
+    pinnedRoute,
+    route,
+    from,
+    splitAt: resolved.kind === 'handoff' ? resolved.splitAt : null,
+  };
+}
+
+function contextForRoute(config, route) {
   const deviceId = route.server.device_id ?? config.device_id;
   const token = loadRouteCredential(route.credentialRef);
 
@@ -51,8 +85,22 @@ export function resolveUploadContext({ source, sessionId, cwd }) {
     deviceId,
     token,
     config,
-    pinnedRoute,
   };
+}
+
+/**
+ * @param {{source: string, sessionId: string, cwd?: string|null}} input
+ * @returns {{
+ *   ok: true, route: object, apiBaseUrl: string, deviceId: string,
+ *   token: string, config: object, pinnedRoute: string|null
+ * } | { ok: false, reason: string }} the context for the route new usage goes
+ *   to (for a hand-off, the organization's)
+ */
+export function resolveUploadContext(input) {
+  const plan = resolveUploadPlan(input);
+  if (!plan.ok) return plan;
+  const context = contextForRoute(plan.config, plan.route);
+  return context.ok ? { ...context, pinnedRoute: plan.pinnedRoute } : context;
 }
 
 /**
@@ -80,7 +128,10 @@ export function resolveUploadContext({ source, sessionId, cwd }) {
 export async function resolveUploadContextWithRefresh(input, log = () => {}) {
   const context = resolveUploadContext(input);
   if (!context.ok) return context;
+  return refreshContext(context, input.source, log);
+}
 
+async function refreshContext(context, source, log) {
   if (context.route.credentialRef !== null) {
     const renewal = await ensureFreshProjectCredential({
       apiBaseUrl: context.apiBaseUrl,
@@ -111,7 +162,7 @@ export async function resolveUploadContextWithRefresh(input, log = () => {}) {
     log(`re-login required: ${outcome.reason}`);
     recordAuthFailure({
       reason: outcome.reason,
-      source: input.source,
+      source,
       apiBaseUrl: context.apiBaseUrl,
     });
     return context;
@@ -168,4 +219,198 @@ export async function uploadWithContext(context, events, log = () => {}, uploade
     context.token = renewal.credential;
     return uploader(context.apiBaseUrl, context.token, context.deviceId, events);
   }
+}
+
+/**
+ * The legs a session's outstanding delta splits into, in upload order.
+ *
+ * Ordinarily one leg: the whole delta to the plan's route. A hand-off has two,
+ * the pre-connect tail to the community server first and the rest to the
+ * organization's (see splitHandoffDelta). Each leg carries the watermark its
+ * event ids derive from and the ledger value to record once it lands, which is
+ * what makes a retry after a partial failure recompute exactly the same thing:
+ * after the first leg the ledger sits at `max(alreadySent, before)` on the
+ * default route, so the next attempt has no tail left and an identical second
+ * leg, ids included.
+ */
+function planLegs(plan, parsed, alreadySent) {
+  if (!parsed) return [{ route: plan.route, pieces: [], watermark: alreadySent, record: null, primary: true }];
+
+  if (plan.kind !== 'handoff') {
+    return [
+      {
+        route: plan.route,
+        pieces: splitSessionDelta(parsed, alreadySent),
+        watermark: alreadySent,
+        record: parsed,
+        primary: true,
+      },
+    ];
+  }
+
+  const { earlier, later } = splitHandoffDelta(parsed, alreadySent, plan.splitAt);
+  return [
+    { route: plan.from, pieces: earlier.pieces, watermark: earlier.watermark, record: earlier.sentAfter, primary: false },
+    { route: plan.route, pieces: later.pieces, watermark: later.watermark, record: parsed, primary: true },
+  ];
+}
+
+function describePieces(pieces) {
+  return (
+    `${sumPieceTokens(pieces)} across ${pieces.length} day(s) ` +
+    `[${pieces.map((p) => `${p.date}:${p.totalTokens}`).join(' ')}]`
+  );
+}
+
+/**
+ * Upload what a session has accrued since its last upload, and record it.
+ *
+ * The caller must already hold the session lock where it takes one: the
+ * ledger is read here, and a second reader would compute an overlapping delta.
+ *
+ * Steps: read the ledger, split the delta into legs (planLegs), resolve each
+ * leg's credential (refreshing it if due), build every event and run the
+ * privacy guard over all of them, then upload leg by leg, recording each one
+ * in the ledger as soon as it lands. Nothing is uploaded if the guard rejects
+ * any event.
+ *
+ * A leg without a credential is skipped and never sent anywhere else. Skipping
+ * the organization's leg leaves its tokens in the ledger for when the
+ * credential is back. Skipping the community tail of a hand-off gives it up
+ * once the organization's leg lands — it has nowhere else to go.
+ *
+ * The usage-limit snapshot rides on the last event of the route new usage goes
+ * to, since that is where it was measured; with no tokens to carry it, it goes
+ * alone in a snapshot-only event.
+ *
+ * Upload errors are thrown as they come, after any earlier leg has been
+ * recorded, so the caller's existing handling (revoked device, re-login) still
+ * applies.
+ *
+ * @param {object} plan - from resolveUploadPlan (must be ok)
+ * @param {object} opts
+ * @param {string} opts.source
+ * @param {string} opts.ledgerKey - the ledger entry whose totals these are (a
+ *   session id, or `sub:<agentId>` for a Codex subagent)
+ * @param {object|null} opts.parsed - cumulative parse result
+ * @param {(deviceId: string, piece: object, watermark: object) => object} opts.buildEvent
+ * @param {object|null} [opts.snapshot] - usage-limit snapshot
+ * @param {(deviceId: string) => object} [opts.buildSnapshotOnlyEvent]
+ * @param {boolean} [opts.monotonic] - record with markTotalsSentMonotonic (the sweep)
+ * @param {(ctx: object, events: object[]) => Promise<object>} [opts.upload]
+ * @param {(msg: string) => void} [opts.log]
+ * @returns {Promise<{
+ *   status: 'nothing' | 'sent' | 'held' | 'skipped',
+ *   tokens: number,
+ *   uploads: Array<{routeId: string, events: object[], verdict: object}>,
+ *   skipped: Array<{routeId: string, reason: string, tokens: number}>,
+ * }>}
+ */
+export async function uploadSessionDelta(plan, opts) {
+  const {
+    source,
+    ledgerKey,
+    parsed,
+    buildEvent,
+    snapshot = null,
+    buildSnapshotOnlyEvent,
+    monotonic = false,
+    log = () => {},
+  } = opts;
+  const upload = opts.upload ?? ((ctx, events) => uploadWithContext(ctx, events, log));
+  const record = monotonic ? markTotalsSentMonotonic : markTotalsSent;
+
+  const alreadySent = getSentTotals(source, ledgerKey);
+  const legs = planLegs(plan, parsed, alreadySent);
+
+  if (plan.kind === 'handoff') {
+    log(
+      `handoff at ${plan.splitAt}: ${legs[0].route.routeId} ${describePieces(legs[0].pieces)}, ` +
+        `${legs[1].route.routeId} ${describePieces(legs[1].pieces)} ` +
+        `(cumulative=${parsed?.totalTokens ?? 0}, alreadySent=${alreadySent.totalTokens})`
+    );
+  } else if (parsed) {
+    log(
+      `delta totalTokens=${describePieces(legs[0].pieces)} ` +
+        `(cumulative=${parsed.totalTokens}, alreadySent=${alreadySent.totalTokens})`
+    );
+  }
+
+  const result = { status: 'nothing', tokens: 0, uploads: [], skipped: [] };
+
+  // Resolve credentials and build every event before uploading anything, so a
+  // guard failure can never leave a hand-off half done.
+  const batches = [];
+  for (const leg of legs) {
+    const carriesSnapshot = leg.primary && snapshot && buildSnapshotOnlyEvent;
+    if (leg.pieces.length === 0 && !carriesSnapshot) continue;
+
+    const resolved = contextForRoute(plan.config, leg.route);
+    if (!resolved.ok) {
+      const tokens = sumPieceTokens(leg.pieces);
+      log(`SKIP ${leg.route.routeId}: ${resolved.reason} (${tokens} tokens not sent)`);
+      result.skipped.push({ routeId: leg.route.routeId, reason: resolved.reason, tokens });
+      continue;
+    }
+    const ctx = await refreshContext(resolved, source, log);
+
+    const events =
+      leg.pieces.length > 0
+        ? leg.pieces.map((piece) => buildEvent(ctx.deviceId, piece, leg.watermark))
+        : [buildSnapshotOnlyEvent(ctx.deviceId)];
+    // A point-in-time reading of the account's rate limits, not per-day data —
+    // the most recent event only, never each.
+    if (carriesSnapshot) {
+      events[events.length - 1].usage_snapshot = { ...snapshot, raw: sanitizeRawOutput(snapshot.raw) };
+    }
+    batches.push({ leg, ctx, events });
+  }
+
+  // The privacy guard runs on the exact objects being uploaded, right before
+  // the network calls. Throws ForbiddenDataError.
+  for (const { events } of batches) {
+    for (const event of events) assertNoForbiddenFields(event);
+  }
+
+  if (batches.length === 0) {
+    if (result.skipped.length > 0) result.status = 'skipped';
+    return result;
+  }
+
+  for (const { leg, ctx, events } of batches) {
+    const tokens = events.reduce((n, e) => n + (e.total_tokens ?? 0), 0);
+    log(`uploading ${events.length} event(s) to ${leg.route.routeId} total_tokens=${tokens}`);
+
+    // One batch per leg, so a partial failure cannot advance the ledger past
+    // days that never landed.
+    const verdict = await upload(ctx, events);
+
+    if (verdict && verdict.parsed) {
+      log(
+        `server verdict accepted=${verdict.accepted} duplicates=${verdict.duplicates} ` +
+          `rejected=${verdict.rejected} reasons=${JSON.stringify(verdict.reasons)}`
+      );
+    }
+    result.uploads.push({ routeId: leg.route.routeId, events, verdict });
+
+    // A 2xx is not proof that the events landed — the server reports
+    // per-event rejections inside the body. Advancing the ledger past an event
+    // the server could still accept loses those tokens permanently, and the
+    // next leg must not go out ahead of this one.
+    if (verdict && !verdict.canAdvanceLedger) {
+      result.status = 'held';
+      return result;
+    }
+
+    // Record what this leg covered, pinning the session to its route. After a
+    // hand-off's second leg the session is pinned to the organization, and the
+    // hand-off is over.
+    if (leg.pieces.length > 0) {
+      record(source, ledgerKey, leg.record, leg.route.routeId);
+      result.tokens += tokens;
+    }
+    result.status = 'sent';
+  }
+
+  return result;
 }

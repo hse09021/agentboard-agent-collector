@@ -363,6 +363,8 @@ export async function connectCommand(
   }
   logger.plain("");
   logger.plain("Sessions run in this directory now go to that server.");
+  logger.plain("Sessions already running here send what they use from now on there too;");
+  logger.plain("what they used before connecting stays with the community server.");
   logger.plain("Everything else keeps going to the community server.");
   logger.plain("");
 }
@@ -405,9 +407,10 @@ export async function disconnectCommand(dir: string): Promise<void> {
   const notice = await retireBinding(removed, next.bindings);
   reportRetired(removed, notice, "this device");
   logger.plain("");
-  // Sessions are pinned to the route of their first successful upload, so an
-  // in-flight session keeps going where it started rather than splitting its
-  // cumulative total across two servers.
+  // A session is pinned to the route of its last successful upload. One
+  // pinned to this connection keeps its tokens in the ledger until the
+  // directory is connected again, rather than sending an organization's work
+  // somewhere else.
   logger.plain("Sessions already in flight stay with their original server;");
   logger.plain("new sessions in this directory go to the community server.");
 }

@@ -530,12 +530,15 @@ export function getSentTotals(source, sessionId) {
 }
 
 /**
- * The route a session was pinned to by its first successful upload.
+ * The route a session was pinned to by its last successful upload.
  *
- * A session must never change server mid-flight: the ledger holds ONE
- * cumulative total per session, so a route change would hand the new server the
- * entire cumulative figure, including work done before the change. Records
- * written before v0.7.0 carry no route and belong to the default server.
+ * The ledger holds ONE cumulative total per session, so a session cannot
+ * simply be re-routed: the new server would receive the whole cumulative
+ * figure, including work done before the change. The one move allowed is the
+ * hand-off of a community-pinned session whose directory gets connected, which
+ * splits the outstanding tokens at `connected_at` (see resolveRoute) and then
+ * re-pins the session here. Records written before v0.7.0 carry no route and
+ * belong to the default server.
  *
  * Returns null when the session has never uploaded, which means it is still
  * free to be routed by cwd.

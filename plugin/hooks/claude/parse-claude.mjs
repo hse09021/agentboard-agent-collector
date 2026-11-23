@@ -164,9 +164,8 @@ export function parseClaudeSession(transcriptPath) {
   const files = readSessionFiles(transcriptPath);
   if (files.length === 0) return null;
 
-  const { totals, byDate } = sumUsageLines(
-    uniqueResponses(files.flatMap((file) => file.usageLines))
-  );
+  const responses = uniqueResponses(files.flatMap((file) => file.usageLines));
+  const { totals, byDate } = sumUsageLines(responses);
   if (totals.totalTokens === 0) return null;
 
   let model;
@@ -190,6 +189,9 @@ export function parseClaudeSession(transcriptPath) {
     startedAt: startedAt ?? new Date().toISOString(),
     endedAt,
     byDate,
+    // One entry per API response, for splitting the session at an instant
+    // (a directory connected mid-session). Counts and timestamps only.
+    entries: responses.map(({ ts, turn }) => ({ ts, turn })),
   };
 }
 
