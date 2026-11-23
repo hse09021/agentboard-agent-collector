@@ -19,6 +19,7 @@ import { readAuthFailure, describeAuthFailure } from "../../core/auth-failure";
 import { loadConfigV2, findOrphans } from "../../core/bindings";
 import { scanAllGhostSessions, removeGhostSessions } from "../../core/ghost-sessions";
 import { listAgentHomes } from "../../core/agent-homes";
+import { describeClaudePlan, detectClaudeSubscriptionPlan } from "../../core/claude-plan";
 import { createDefaultRouteClient } from "../../api/client";
 import { COLLECTOR_VERSION } from "../../core/usage-event";
 import { logger } from "../../core/logger";
@@ -172,6 +173,18 @@ async function runChecks(): Promise<CheckResult[]> {
     label: "Collector version",
     ok: true,
     message: `v${COLLECTOR_VERSION}`,
+  });
+
+  // 5b. Claude plan
+  //
+  // `/usage` prints no plan name, so the hooks attach the one Claude Code keeps
+  // locally, and the dashboard's plan recommendation is priced off it. A stale
+  // one passes every other check, hence a line of its own that names the
+  // source. Informational only: an API-key user legitimately has no plan.
+  results.push({
+    label: "Claude plan",
+    ok: true,
+    message: describeClaudePlan(detectClaudeSubscriptionPlan()),
   });
 
   // 6. Hook registration checks — one row per agent home, not one per tool.

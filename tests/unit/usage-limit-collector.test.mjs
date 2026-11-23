@@ -2,13 +2,18 @@
  * Tests for plugin/hooks/lib/usage-limit-collector.mjs
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   captureUsageLimitRaw,
+  claudeCredentialsPath,
+  claudeKeychainService,
+  claudeProfilePath,
+  detectClaudeSubscriptionPlan,
   readClaudeSubscriptionPlan,
   readCodexRateLimits,
 } from '../../plugin/hooks/lib/usage-limit-collector.mjs';
@@ -100,6 +105,10 @@ describe('captureUsageLimitRaw', () => {
   });
 });
 
+// Every test below points the profile at a path that does not exist unless it
+// writes one, so the real ~/.claude.json never leaks in.
+const MISSING_PROFILE = '/path/that/does/not/exist/.claude.json';
+
 describe('readClaudeSubscriptionPlan', () => {
   it('reads only the normalized subscription type from Claude credentials', () => {
     const dir = mkdtempSync(join(tmpdir(), 'agentboard-claude-credentials-'));
@@ -117,7 +126,7 @@ describe('readClaudeSubscriptionPlan', () => {
     );
 
     try {
-      expect(readClaudeSubscriptionPlan({ credentialsPath })).toBe('pro');
+      expect(readClaudeSubscriptionPlan({ profilePath: MISSING_PROFILE, credentialsPath })).toBe('pro');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -137,7 +146,7 @@ describe('readClaudeSubscriptionPlan', () => {
     );
 
     try {
-      expect(readClaudeSubscriptionPlan({ credentialsPath })).toBe('max20x');
+      expect(readClaudeSubscriptionPlan({ profilePath: MISSING_PROFILE, credentialsPath })).toBe('max20x');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -148,6 +157,7 @@ describe('readClaudeSubscriptionPlan', () => {
     // where the default reader would otherwise hit the real login Keychain.
     expect(
       readClaudeSubscriptionPlan({
+        profilePath: MISSING_PROFILE,
         credentialsPath: '/path/that/does/not/exist',
         keychainReader: () => '',
       })
@@ -168,6 +178,7 @@ describe('readClaudeSubscriptionPlan', () => {
 
     expect(
       readClaudeSubscriptionPlan({
+        profilePath: MISSING_PROFILE,
         credentialsPath: '/path/that/does/not/exist',
         keychainReader,
       })
@@ -184,7 +195,9 @@ describe('readClaudeSubscriptionPlan', () => {
     const keychainReader = () => JSON.stringify({ claudeAiOauth: { subscriptionType: 'pro' } });
 
     try {
-      expect(readClaudeSubscriptionPlan({ credentialsPath, keychainReader })).toBe('max20x');
+      expect(
+        readClaudeSubscriptionPlan({ profilePath: MISSING_PROFILE, credentialsPath, keychainReader })
+      ).toBe('max20x');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -197,10 +210,230 @@ describe('readClaudeSubscriptionPlan', () => {
 
     expect(
       readClaudeSubscriptionPlan({
+        profilePath: MISSING_PROFILE,
         credentialsPath: '/path/that/does/not/exist',
         keychainReader,
       })
     ).toBeUndefined();
+  });
+});
+
+// The scenario from #18: Max 5x at sign-in, downgraded to Pro on claude.ai
+// without signing in again. The credentials still say Max; .claude.json was
+// refreshed on the next Claude Code start.
+describe('detectClaudeSubscriptionPlan — .claude.json first', () => {
+  const STALE_MAX_CREDENTIALS = JSON.stringify({
+    claudeAiOauth: {
+      accessToken: 'sk-ant-oat01-secret',
+      refreshToken: 'sk-ant-ort01-secret',
+      subscriptionType: 'max',
+      rateLimitTier: 'default_claude_max_5x',
+    },
+  });
+
+  // Shaped like the real file: the plan fields sit next to account details
+  // that must never come out of the reader.
+  function profile(oauthAccount) {
+    return JSON.stringify({
+      numStartups: 42,
+      projects: { '/Users/someone/secret-repo': { allowedTools: [] } },
+      oauthAccount: {
+        accountUuid: 'acc-uuid-1234',
+        emailAddress: 'someone@example.com',
+        displayName: 'Some One',
+        organizationUuid: 'org-uuid-5678',
+        organizationName: 'Secret Org Inc',
+        ...oauthAccount,
+      },
+    });
+  }
+
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'agentboard-claude-profile-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Every location lives in `dir`; the Keychain reader records what it was asked for. */
+  function detectIn(files, { env = { CLAUDE_CONFIG_DIR: dir }, keychain = '' } = {}) {
+    for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
+    const services = [];
+    const result = detectClaudeSubscriptionPlan({
+      env,
+      keychainReader: (service) => {
+        services.push(service);
+        return keychain;
+      },
+    });
+    return { result, services };
+  }
+
+  it('prefers .claude.json over stale sign-in credentials', () => {
+    const { result } = detectIn(
+      {
+        '.claude.json': profile({ organizationType: 'claude_pro', organizationRateLimitTier: 'default_claude_ai' }),
+        '.credentials.json': STALE_MAX_CREDENTIALS,
+      },
+      { keychain: STALE_MAX_CREDENTIALS }
+    );
+    expect(result).toEqual({ planName: 'pro', source: 'claude_json' });
+  });
+
+  it.each([
+    ['claude_pro', 'default_claude_ai', 'pro'],
+    ['claude_pro', undefined, 'pro'],
+    ['claude_pro', 'default_claude_max_20x', 'pro'],
+    ['claude_max', 'default_claude_max_5x', 'max5x'],
+    ['claude_max', 'default_claude_max_20x', 'max20x'],
+    ['claude_team', undefined, 'team'],
+    ['claude_enterprise', undefined, 'enterprise'],
+  ])('maps %s + %s to %s', (organizationType, organizationRateLimitTier, planName) => {
+    const { result } = detectIn({
+      '.claude.json': profile({ organizationType, organizationRateLimitTier }),
+    });
+    expect(result).toEqual({ planName, source: 'claude_json' });
+  });
+
+  it.each([
+    ['claude_max with an unknown tier', { organizationType: 'claude_max', organizationRateLimitTier: 'default_claude_max_99x' }],
+    ['claude_max without a tier', { organizationType: 'claude_max' }],
+    ['claude_free', { organizationType: 'claude_free' }],
+    ['an unknown organization type', { organizationType: 'claude_galaxy' }],
+    ['a prototype key', { organizationType: 'constructor' }],
+    ['a non-string type', { organizationType: { nested: 'claude_pro' } }],
+    ['no organization type', {}],
+  ])('falls back to the credentials for %s', (_label, oauthAccount) => {
+    const { result } = detectIn({
+      '.claude.json': profile(oauthAccount),
+      '.credentials.json': STALE_MAX_CREDENTIALS,
+    });
+    expect(result).toEqual({ planName: 'max5x', source: 'credentials_file' });
+  });
+
+  it.each([
+    ['no oauthAccount', JSON.stringify({ numStartups: 1 })],
+    ['a half-written file', '{"oauthAccount": {"organizationType": "claude_'],
+    ['an empty file', ''],
+    ['JSON null', 'null'],
+  ])('falls back to the credentials for %s', (_label, content) => {
+    const { result } = detectIn({ '.claude.json': content, '.credentials.json': STALE_MAX_CREDENTIALS });
+    expect(result).toEqual({ planName: 'max5x', source: 'credentials_file' });
+  });
+
+  it('without .claude.json, behaves as before: credentials file, then Keychain', () => {
+    expect(detectIn({ '.credentials.json': STALE_MAX_CREDENTIALS }).result).toEqual({
+      planName: 'max5x',
+      source: 'credentials_file',
+    });
+
+    rmSync(join(dir, '.credentials.json'));
+    expect(detectIn({}, { keychain: STALE_MAX_CREDENTIALS }).result).toEqual({
+      planName: 'max5x',
+      source: 'keychain',
+    });
+  });
+
+  it('returns only the plan name and its source — no account field survives', () => {
+    const { result } = detectIn({
+      '.claude.json': profile({ organizationType: 'claude_max', organizationRateLimitTier: 'default_claude_max_20x' }),
+    });
+
+    expect(Object.keys(result).sort()).toEqual(['planName', 'source']);
+    const serialized = JSON.stringify(result);
+    for (const secret of ['someone@example.com', 'Some One', 'Secret Org Inc', 'acc-uuid', 'org-uuid', 'secret-repo']) {
+      expect(serialized).not.toContain(secret);
+    }
+    expect(readClaudeSubscriptionPlan({ env: { CLAUDE_CONFIG_DIR: dir }, keychainReader: () => '' })).toBe('max20x');
+  });
+
+  it("uses CLAUDE_CONFIG_DIR's .claude.json, credentials and suffixed Keychain item", () => {
+    const expectedService = `Claude Code-credentials-${createHash('sha256').update(dir).digest('hex').slice(0, 8)}`;
+
+    // Nothing on disk: the Keychain is asked for this dir's own item.
+    const { result, services } = detectIn({}, { keychain: STALE_MAX_CREDENTIALS });
+    expect(services).toEqual([expectedService]);
+    expect(result).toEqual({ planName: 'max5x', source: 'keychain' });
+
+    // A .claude.json inside the dir is picked up without any path override.
+    writeFileSync(join(dir, '.claude.json'), profile({ organizationType: 'claude_team' }));
+    expect(detectIn({}).result).toEqual({ planName: 'team', source: 'claude_json' });
+  });
+
+  it('CLAUDE_SECURESTORAGE_CONFIG_DIR decides the credentials dir and Keychain suffix, not .claude.json', () => {
+    const secureDir = mkdtempSync(join(tmpdir(), 'agentboard-claude-secure-'));
+    try {
+      writeFileSync(join(secureDir, '.credentials.json'), STALE_MAX_CREDENTIALS);
+      const env = { CLAUDE_CONFIG_DIR: dir, CLAUDE_SECURESTORAGE_CONFIG_DIR: secureDir };
+
+      // Credentials come from the secure-storage dir, not CLAUDE_CONFIG_DIR.
+      expect(detectIn({}, { env }).result).toEqual({ planName: 'max5x', source: 'credentials_file' });
+
+      // ...and the Keychain suffix hashes it too.
+      rmSync(join(secureDir, '.credentials.json'));
+      const { services } = detectIn({}, { env });
+      expect(services).toEqual([
+        `Claude Code-credentials-${createHash('sha256').update(secureDir).digest('hex').slice(0, 8)}`,
+      ]);
+
+      // .claude.json still follows CLAUDE_CONFIG_DIR.
+      writeFileSync(join(dir, '.claude.json'), profile({ organizationType: 'claude_pro' }));
+      expect(detectIn({}, { env }).result).toEqual({ planName: 'pro', source: 'claude_json' });
+    } finally {
+      rmSync(secureDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Claude Code locations', () => {
+  it('puts .claude.json in the home directory itself, not ~/.claude/', () => {
+    expect(claudeProfilePath({})).toBe(join(homedir(), '.claude.json'));
+    expect(claudeProfilePath({ CLAUDE_CONFIG_DIR: '' })).toBe(join(homedir(), '.claude.json'));
+    expect(claudeProfilePath({ CLAUDE_CONFIG_DIR: '/tmp/claude-alt' })).toBe(join('/tmp/claude-alt', '.claude.json'));
+    // The secure-storage dir only moves credentials.
+    expect(claudeProfilePath({ CLAUDE_SECURESTORAGE_CONFIG_DIR: '/tmp/secure-alt' })).toBe(
+      join(homedir(), '.claude.json')
+    );
+  });
+
+  it('puts .credentials.json in the secure-storage dir, else the config dir', () => {
+    expect(claudeCredentialsPath({})).toBe(join(homedir(), '.claude', '.credentials.json'));
+    expect(claudeCredentialsPath({ CLAUDE_CONFIG_DIR: '/tmp/claude-alt' })).toBe(
+      join('/tmp/claude-alt', '.credentials.json')
+    );
+    expect(
+      claudeCredentialsPath({ CLAUDE_CONFIG_DIR: '/tmp/claude-alt', CLAUDE_SECURESTORAGE_CONFIG_DIR: '/tmp/secure-alt' })
+    ).toBe(join('/tmp/secure-alt', '.credentials.json'));
+    // Defined but empty means the default dir, even with CLAUDE_CONFIG_DIR set.
+    expect(
+      claudeCredentialsPath({ CLAUDE_CONFIG_DIR: '/tmp/claude-alt', CLAUDE_SECURESTORAGE_CONFIG_DIR: '' })
+    ).toBe(join(homedir(), '.claude', '.credentials.json'));
+  });
+
+  // Expected suffixes are sha256 of the literal strings, computed once by hand,
+  // so a change in what gets hashed shows up here.
+  it.each([
+    ['no override', {}, 'Claude Code-credentials'],
+    ['an empty CLAUDE_CONFIG_DIR', { CLAUDE_CONFIG_DIR: '' }, 'Claude Code-credentials'],
+    ['CLAUDE_CONFIG_DIR', { CLAUDE_CONFIG_DIR: '/tmp/claude-alt' }, 'Claude Code-credentials-04923786'],
+    [
+      'CLAUDE_SECURESTORAGE_CONFIG_DIR over CLAUDE_CONFIG_DIR',
+      { CLAUDE_CONFIG_DIR: '/tmp/claude-alt', CLAUDE_SECURESTORAGE_CONFIG_DIR: '/tmp/secure-alt' },
+      'Claude Code-credentials-c8a84914',
+    ],
+    ['CLAUDE_SECURESTORAGE_CONFIG_DIR alone', { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/tmp/secure-alt' }, 'Claude Code-credentials-c8a84914'],
+    [
+      'an empty CLAUDE_SECURESTORAGE_CONFIG_DIR, which drops the suffix',
+      { CLAUDE_CONFIG_DIR: '/tmp/claude-alt', CLAUDE_SECURESTORAGE_CONFIG_DIR: '' },
+      'Claude Code-credentials',
+    ],
+    // Claude Code NFC-normalizes before hashing: a decomposed "é" (as some
+    // filesystems hand it back) must name the same item as a composed one.
+    ['a decomposed accent', { CLAUDE_CONFIG_DIR: '/Users/me/café' }, 'Claude Code-credentials-12e72a48'],
+    ['a composed accent', { CLAUDE_CONFIG_DIR: '/Users/me/café' }, 'Claude Code-credentials-12e72a48'],
+  ])('names the Keychain item for %s', (_label, env, service) => {
+    expect(claudeKeychainService(env)).toBe(service);
   });
 });
 

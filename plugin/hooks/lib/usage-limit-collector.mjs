@@ -29,6 +29,7 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -99,51 +100,177 @@ function planFromCredentialsJson(raw) {
   return undefined;
 }
 
+// Two places hold the Claude plan, and they go stale at different times
+// (Claude Code 2.1.330):
+//
+//   - The OAuth credentials (`claudeAiOauth.subscriptionType` /
+//     `rateLimitTier`, in the Keychain or .credentials.json) are set at
+//     sign-in, and token refreshes do not reliably update them once filled:
+//     #18 caught a downgrade to Pro on claude.ai still reading Max 5x there.
+//     They catch up at the next /login.
+//   - `.claude.json`'s `oauthAccount.organizationType` /
+//     `organizationRateLimitTier` are merged in from /api/claude_cli/bootstrap
+//     on every Claude Code start.
+//
+// So `.claude.json` is read first. Those are undocumented internal fields,
+// though, and CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC skips the bootstrap
+// call altogether, so the credentials stay as the fallback.
+//
+// Keys are the organization types Claude Code itself maps to plans. claude_max
+// spans two tiers whose limits differ fourfold, so it only counts together with
+// a tier we recognize; anything else falls through to the credentials rather
+// than guessing. The names stay `max5x`/`max20x`: the server maps them to its
+// current plan names on read (hse09021/AgentBoard#112).
+//
+// Maps, not object literals: the key comes from a file, and a value like
+// "constructor" must not resolve to a prototype member.
+const PROFILE_PLAN_BY_ORGANIZATION_TYPE = new Map([
+  ['claude_pro', 'pro'],
+  ['claude_team', 'team'],
+  ['claude_enterprise', 'enterprise'],
+]);
+const PROFILE_MAX_PLAN_BY_RATE_LIMIT_TIER = new Map([
+  ['default_claude_max_5x', 'max5x'],
+  ['default_claude_max_20x', 'max20x'],
+]);
+
+/**
+ * Extracts the plan name from a raw `.claude.json` string.
+ *
+ * `oauthAccount` also carries the email address, display name and
+ * organization name. Only the two plan fields are read out of it, and only the
+ * mapped plan name leaves this function.
+ *
+ * @param {string} raw
+ * @returns {string|undefined}
+ */
+function planFromProfileJson(raw) {
+  const account = JSON.parse(raw)?.oauthAccount;
+  const organizationType = account?.organizationType;
+  const rateLimitTier = account?.organizationRateLimitTier;
+
+  if (organizationType === 'claude_max') {
+    return PROFILE_MAX_PLAN_BY_RATE_LIMIT_TIER.get(rateLimitTier);
+  }
+  return PROFILE_PLAN_BY_ORGANIZATION_TYPE.get(organizationType);
+}
+
+// CLAUDE_CONFIG_DIR, not homedir(), when the agent that spawned this hook was
+// launched against a relocated home. Orchestrators do exactly that to hot-swap
+// accounts, and reading the default locations there reports a DIFFERENT
+// account's plan — which then feeds the plan recommendation and quietly makes
+// it wrong. All three locations below follow it, each by Claude Code's own rule.
+
+/**
+ * Claude Code's global config file: `join(CLAUDE_CONFIG_DIR || homedir(),
+ * '.claude.json')`. Without CLAUDE_CONFIG_DIR it sits in the home directory
+ * itself, NOT inside ~/.claude/.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string}
+ */
+export function claudeProfilePath(env = process.env) {
+  return join(env.CLAUDE_CONFIG_DIR?.trim() || homedir(), '.claude.json');
+}
+
+/**
+ * Claude Code's plaintext credentials file (Linux/Windows). It lives in what
+ * Claude Code calls its secure-storage dir: CLAUDE_SECURESTORAGE_CONFIG_DIR
+ * whenever that is defined (empty meaning ~/.claude), else the config dir.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string}
+ */
+export function claudeCredentialsPath(env = process.env) {
+  const secureDir = env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+  const dir =
+    secureDir !== undefined
+      ? secureDir || join(homedir(), '.claude')
+      : env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), '.claude');
+  return join(dir, '.credentials.json');
+}
+
+const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
+
+/**
+ * The macOS Keychain item Claude Code keeps its credentials under. With a
+ * relocated config dir it appends `-<first 8 hex of sha256(dir)>` so each dir
+ * keeps its own sign-in, and the bare name then belongs to the DEFAULT account.
+ *
+ * Any difference in the hashed string names a different item, so this copies
+ * Claude Code 2.1.330's rule as is rather than tidying it: the env value is
+ * hashed raw (NFC-normalized, not trimmed or resolved),
+ * CLAUDE_SECURESTORAGE_CONFIG_DIR wins whenever it is defined, and an empty
+ * value means no suffix.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string}
+ */
+export function claudeKeychainService(env = process.env) {
+  const secureDir = env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+  const hashedDir = secureDir !== undefined ? secureDir : env.CLAUDE_CONFIG_DIR;
+  if (!hashedDir) return CLAUDE_KEYCHAIN_SERVICE;
+
+  const suffix = createHash('sha256').update(hashedDir.normalize('NFC')).digest('hex').slice(0, 8);
+  return `${CLAUDE_KEYCHAIN_SERVICE}-${suffix}`;
+}
+
 /**
  * Reads the raw Claude credentials JSON from the macOS Keychain. On macOS,
- * Claude Code stores OAuth credentials in the login Keychain under the
- * "Claude Code-credentials" generic-password item and does NOT write
- * ~/.claude/.credentials.json, so this is the only place the plan name is
- * available there. Returns '' on any failure (item missing, not macOS, etc.).
+ * Claude Code stores OAuth credentials in the login Keychain and does NOT
+ * write .credentials.json, so this is where the sign-in plan lives there.
+ * Returns '' on any failure (item missing, not macOS, etc.).
  *
- * @param {() => string} [execImpl] injectable for tests
+ * @param {string} service Keychain item name, from claudeKeychainService()
+ * @param {(service: string) => string} [execImpl] injectable for tests
  * @returns {string}
  */
 function readClaudeKeychainCredentials(
-  execImpl = () =>
-    execFileSync('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], {
+  service,
+  execImpl = (name) =>
+    execFileSync('security', ['find-generic-password', '-s', name, '-w'], {
       encoding: 'utf-8',
     })
 ) {
   try {
-    return execImpl() ?? '';
+    return execImpl(service) ?? '';
   } catch {
     return '';
   }
 }
 
 /**
- * Reads Claude Code's local account metadata and returns only the normalized
- * plan name. Access/refresh tokens are never returned or uploaded.
+ * Finds the Claude plan and where it came from: `.claude.json` first, then the
+ * credentials file, then the macOS Keychain. Returns only the normalized plan
+ * name and a source tag — never tokens or any other account field.
  *
- * Looks in the on-disk credentials file first (Linux/Windows, or when the
- * macOS Keychain is unavailable), then falls back to the macOS Keychain,
- * where Claude Code actually stores credentials on macOS.
+ * Mirrored in src/core/claude-plan.ts so `agentboard doctor` can show it.
  *
- * @param {{credentialsPath?: string, keychainReader?: () => string}} [opts]
- * @returns {string|undefined}
+ * @param {{
+ *   env?: NodeJS.ProcessEnv,
+ *   profilePath?: string,
+ *   credentialsPath?: string,
+ *   keychainReader?: (service: string) => string,
+ * }} [opts] every location is injectable so tests never touch the real home
+ *   directory or Keychain
+ * @returns {{planName: string, source: 'claude_json'|'credentials_file'|'keychain'}|undefined}
  */
-export function readClaudeSubscriptionPlan(opts = {}) {
-  // CLAUDE_CONFIG_DIR, not homedir(), when the agent that spawned this hook was
-  // launched against a relocated home. Orchestrators do exactly that to hot-swap
-  // accounts, and reading ~/.claude there reports a DIFFERENT account's plan —
-  // which then feeds the plan recommendation and quietly makes it wrong.
-  const claudeHome = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), '.claude');
-  const credentialsPath = opts.credentialsPath ?? join(claudeHome, '.credentials.json');
+export function detectClaudeSubscriptionPlan(opts = {}) {
+  const env = opts.env ?? process.env;
 
   try {
-    const planName = planFromCredentialsJson(readFileSync(credentialsPath, 'utf-8'));
-    if (planName) return planName;
+    const raw = readFileSync(opts.profilePath ?? claudeProfilePath(env), 'utf-8');
+    const planName = planFromProfileJson(raw);
+    if (planName) return { planName, source: 'claude_json' };
+  } catch {
+    // Best-effort only. A missing or half-written .claude.json falls back to
+    // the credentials below.
+  }
+
+  try {
+    const raw = readFileSync(opts.credentialsPath ?? claudeCredentialsPath(env), 'utf-8');
+    const planName = planFromCredentialsJson(raw);
+    if (planName) return { planName, source: 'credentials_file' };
   } catch {
     // Best-effort only. Missing/changed credential files must not affect
     // usage snapshot capture.
@@ -152,10 +279,10 @@ export function readClaudeSubscriptionPlan(opts = {}) {
   // macOS stores credentials in the Keychain, not the file above.
   if (process.platform === 'darwin' || opts.keychainReader) {
     try {
-      const raw = readClaudeKeychainCredentials(opts.keychainReader);
+      const raw = readClaudeKeychainCredentials(claudeKeychainService(env), opts.keychainReader);
       if (raw) {
         const planName = planFromCredentialsJson(raw);
-        if (planName) return planName;
+        if (planName) return { planName, source: 'keychain' };
       }
     } catch {
       // Best-effort only, same as above.
@@ -163,6 +290,17 @@ export function readClaudeSubscriptionPlan(opts = {}) {
   }
 
   return undefined;
+}
+
+/**
+ * Reads Claude Code's local account metadata and returns only the normalized
+ * plan name. Tokens and account details are never returned or uploaded.
+ *
+ * @param {Parameters<typeof detectClaudeSubscriptionPlan>[0]} [opts]
+ * @returns {string|undefined}
+ */
+export function readClaudeSubscriptionPlan(opts = {}) {
+  return detectClaudeSubscriptionPlan(opts)?.planName;
 }
 
 // NOT SAFE TO USE — see module docstring. Kept only so a future fix has
