@@ -17,7 +17,9 @@ import {
   addTrackedDir,
   bindingCovering,
   defaultServerName,
+  describeCollectionScope,
   findTrackedDir,
+  serverDisplayName,
   removeTrackedDir,
   setDefaultScope,
   trackedDirCovering,
@@ -126,5 +128,87 @@ describe("tracked directories", () => {
   it("switches scope and names the default server", () => {
     expect(setDefaultScope(config(), "listed").default_scope).toBe("listed");
     expect(defaultServerName(config())).toBe("agentboard.cloud");
+  });
+});
+
+// #27: status and doctor name each server by where it is, not only its label.
+describe("serverDisplayName", () => {
+  const server = (app: string, label?: string) => ({ api_base_url: `${app}/api/proxy`, app_base_url: app, label });
+
+  it("pairs a label the organization chose with the host", () => {
+    expect(serverDisplayName(server("http://localhost:3000", "Organization"))).toBe("Organization (localhost:3000)");
+    expect(serverDisplayName(server("https://agentboard.acme.internal", "Acme"))).toBe("Acme (agentboard.acme.internal)");
+  });
+
+  it("writes the host once when the label is the host", () => {
+    expect(serverDisplayName(server("https://agentboard.cloud", "agentboard.cloud"))).toBe("agentboard.cloud");
+    // A config promoted from v1 labels the default server with the bare hostname.
+    expect(serverDisplayName(server("http://localhost:3000", "localhost"))).toBe("localhost:3000");
+    expect(serverDisplayName(server("http://localhost:3000"))).toBe("localhost:3000");
+  });
+
+  it("shows a URL it cannot parse as it is", () => {
+    expect(serverDisplayName(server("not a url", "Acme"))).toBe("Acme (not a url)");
+  });
+});
+
+describe("describeCollectionScope", () => {
+  const NOW = "2026-11-24T09:00:00.000Z";
+  const org = { api_base_url: "http://localhost:3000/api/proxy", app_base_url: "http://localhost:3000", label: "Organization" };
+  const connected = () => ({
+    abs_dir: "/work/billing-api",
+    real_dir: "/work/billing-api",
+    credential_ref: "ref",
+    connected_at: NOW,
+    server: org,
+  });
+  const tracked = { abs_dir: "/side/blog", real_dir: "/side/blog", added_at: NOW };
+
+  it("in all scope, sends every unconnected directory and still lists tracked ones as inactive", () => {
+    expect(describeCollectionScope({ ...config(), tracked_dirs: [tracked] })).toEqual({
+      scope: "all",
+      server: "agentboard.cloud",
+      headline: "every directory not connected to an organization sends usage to agentboard.cloud",
+      note: undefined,
+      tracked: [tracked],
+      trackedHeading: "Tracked directories (used only in listed scope)",
+    });
+  });
+
+  it("in listed scope, sends only tracked directories", () => {
+    const summary = describeCollectionScope({ ...config(), default_scope: "listed", tracked_dirs: [tracked] });
+    expect(summary.headline).toBe(
+      "only tracked directories send usage to agentboard.cloud; other unconnected directories send nothing"
+    );
+    expect(summary.trackedHeading).toBe("Tracked directories");
+  });
+
+  it("says nothing goes to the default server in listed scope with nothing tracked", () => {
+    const summary = describeCollectionScope({ ...config(), default_scope: "listed" });
+    expect(summary.headline).toBe(
+      "no directory is tracked, so nothing goes to agentboard.cloud; run `agentboard track <dir>` to add one"
+    );
+    expect(summary.tracked).toEqual([]);
+  });
+
+  it("says when unconnected usage reaches an organization because the user logged in to it", () => {
+    const loggedInToOrg = { ...migrateV1toV2({ api_base_url: "http://localhost:3000/api/proxy/" }), bindings: [connected()] };
+    const summary = describeCollectionScope(loggedInToOrg);
+    expect(summary.server).toBe("localhost:3000");
+    expect(summary.note).toBe(
+      "localhost:3000 is also your connected projects' server: usage from unconnected directories reaches that organization too, outside any project"
+    );
+
+    // In listed scope only tracked directories get there, and with none tracked nothing does.
+    expect(
+      describeCollectionScope({ ...loggedInToOrg, default_scope: "listed", tracked_dirs: [tracked] }).note
+    ).toBe(
+      "localhost:3000 is also your connected projects' server: usage from tracked directories reaches that organization too, outside any project"
+    );
+    expect(describeCollectionScope({ ...loggedInToOrg, default_scope: "listed" }).note).toBeUndefined();
+  });
+
+  it("adds no note when connected projects go elsewhere", () => {
+    expect(describeCollectionScope({ ...config(), bindings: [connected()] }).note).toBeUndefined();
   });
 });

@@ -119,6 +119,10 @@ agentboard status
 ```
 
 인증 상태, 기기 ID, 훅 등록 여부, 주간/월간 사용량 통계를 표시합니다.
+디렉터리별로 사용량이 어느 서버로 가는지도 보여 줍니다.
+
+- `Connected projects`: 조직에 연결한 디렉터리입니다. 줄마다 프로젝트 이름, 조직 서버(`라벨 (주소)`), 디렉터리 경로가 나옵니다.
+- `Unconnected directories`: 연결하지 않은 디렉터리의 사용량을 보내는 서버와 수집 범위(`all` 또는 `listed`), 등록한 디렉터리 목록입니다.
 
 ### 4. 진단
 
@@ -127,6 +131,8 @@ agentboard doctor
 ```
 
 설정 디렉터리 접근성, API 연결 상태, 훅 등록 유효성 등 전체 환경을 점검합니다. 감지한 Claude 요금제와 그 출처도 보여 줍니다.
+연결한 프로젝트마다 디렉터리 경로를 함께 보여 주고, `Collection scope` 줄에서 수집 범위와 등록한 디렉터리를 보여 줍니다.
+`API connectivity`는 기본 서버(`agentboard login`한 서버)만 확인합니다.
 
 ### 5. 훅 해제
 
@@ -158,6 +164,9 @@ agentboard disconnect ./billing-api   # 해제
 
 등록 토큰은 조직의 웹 UI에서 프로젝트에 사용자를 등록할 때 발급됩니다.
 15분짜리 1회용이며, `connect`가 즉시 기기 전용 자격증명으로 교환하고 토큰은 소멸합니다.
+
+연결한 디렉터리는 `agentboard status`와 `agentboard doctor`에서 프로젝트 이름, 조직 서버 주소와 함께 확인할 수 있습니다.
+같은 프로젝트에 여러 디렉터리를 연결하면 디렉터리마다 한 줄씩 나옵니다.
 
 조직 서버가 토큰 회전을 지원하면, 연결 자격증명은 기본 로그인과 같은 **access/refresh 한 쌍**입니다.
 access는 한 시간짜리이고 만료 직전에 업로드하면서 자동으로 회전하며, 같은 refresh가 두 번 쓰이면
@@ -213,7 +222,7 @@ agentboard scope all          # 다시 전부 보내기
 - `listed`에서 보내지 않은 사용량은 나중에 디렉터리를 다시 등록하거나 `all`로 돌아가도 보내지 않습니다.
 - 보내지 않는 세션은 요금제 한도 스냅샷(`/usage`)도 실행하지 않습니다.
 - 조직에 연결한 디렉터리(`agentboard connect`)는 수집 범위와 상관없이 그 조직으로 갑니다.
-- 등록한 경로는 로컬 `config.json`에만 저장하고 전송하지 않습니다. `agentboard status`의 `Collection scope`에서 확인할 수 있습니다.
+- 등록한 경로는 로컬 `config.json`에만 저장하고 전송하지 않습니다. `agentboard status`의 `Unconnected directories`나 `agentboard doctor`의 `Collection scope`에서 확인할 수 있습니다. `all`일 때도 목록은 보여 주며, `listed`로 바꿔야 적용됩니다.
 
 ### 구독 한도 스냅샷
 

@@ -20,7 +20,7 @@ import { ApiError, createDefaultRouteClient } from "../../api/client";
 import { UsageSummary, UsageBySource } from "../../api/types";
 import { logger } from "../../core/logger";
 import { listAgentHomes } from "../../core/agent-homes";
-import { defaultServerName } from "../../core/tracked-dirs";
+import { describeCollectionScope } from "../../core/tracked-dirs";
 import chalk from "chalk";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -160,34 +160,40 @@ export async function statusCommand(): Promise<void> {
   // ── Connected projects ───────────────────────────────────────────────────
   // Hooks renew these credentials in the background. A refusal or an expiry is
   // otherwise invisible: the organization dashboard just stops growing.
-  const connections = reportProjectCredentials(loadConfigV2().bindings, loadProjectCredential);
+  //
+  // Each row names its directory: two directories connected to the same
+  // project otherwise print as identical lines (#27).
+  const v2 = loadConfigV2();
+  const connections = reportProjectCredentials(v2.bindings, loadProjectCredential);
   if (connections.length > 0) {
-    logger.plain(chalk.bold("Connected projects"));
+    logger.plain(`${chalk.bold("Connected projects")}  ${chalk.dim("(usage goes to the organization)")}`);
     logger.plain("─".repeat(40));
     for (const row of connections) {
       const icon = row.ok ? chalk.green("✔") : chalk.yellow("!");
       logger.plain(`  ${icon}  ${row.label}  ${row.ok ? chalk.dim(row.message) : chalk.yellow(row.message)}`);
+      logger.plain(`       ${row.dir}`);
     }
     logger.plain("");
   }
 
-  // ── Collection scope ─────────────────────────────────────────────────────
+  // ── Unconnected directories ──────────────────────────────────────────────
   // In listed scope most directories send nothing, which otherwise looks like
-  // collection silently stopped.
-  const scopeConfig = loadConfigV2();
-  const serverName = defaultServerName(scopeConfig);
-  logger.plain(chalk.bold("Collection scope"));
+  // collection silently stopped. The tracked list is shown in either scope, as
+  // `agentboard scope` does, so it can be checked before switching (#27).
+  const scope = describeCollectionScope(v2);
+  logger.plain(`${chalk.bold("Unconnected directories")}  ${chalk.dim(`(usage goes to ${scope.server})`)}`);
   logger.plain("─".repeat(40));
-  if (scopeConfig.default_scope === "listed") {
-    logger.plain(`  ${chalk.yellow("listed")}  ${chalk.dim(`only these directories send usage to ${serverName}`)}`);
-    if (scopeConfig.tracked_dirs.length === 0) {
-      logger.plain(chalk.yellow(`  !  none — nothing goes to ${serverName}. Run \`agentboard track <dir>\`.`));
+  const mode = scope.scope === "listed" ? chalk.yellow("listed") : chalk.green("all");
+  const headline = scope.scope === "listed" && scope.tracked.length === 0
+    ? chalk.yellow(scope.headline)
+    : chalk.dim(scope.headline);
+  logger.plain(`  Scope: ${mode}  ${headline}`);
+  if (scope.note) logger.plain(chalk.yellow(`  !  ${scope.note}`));
+  if (scope.tracked.length > 0) {
+    logger.plain(`  ${scope.trackedHeading}:`);
+    for (const dir of scope.tracked) {
+      logger.plain(`    ${dir.abs_dir}  ${chalk.dim(`since ${dir.added_at}`)}`);
     }
-    for (const dir of scopeConfig.tracked_dirs) {
-      logger.plain(`  ${chalk.green("✔")}  ${dir.abs_dir}  ${chalk.dim(`since ${dir.added_at}`)}`);
-    }
-  } else {
-    logger.plain(`  ${chalk.green("all")}  ${chalk.dim(`every directory not connected to an organization sends usage to ${serverName}`)}`);
   }
   logger.plain("");
 

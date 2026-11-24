@@ -17,6 +17,7 @@ import {
 } from "../../core/credential-status";
 import { readAuthFailure, describeAuthFailure } from "../../core/auth-failure";
 import { loadConfigV2, findOrphans } from "../../core/bindings";
+import { describeCollectionScope, serverDisplayName } from "../../core/tracked-dirs";
 import { scanAllGhostSessions, removeGhostSessions } from "../../core/ghost-sessions";
 import { listAgentHomes } from "../../core/agent-homes";
 import { describeClaudePlan, detectClaudeSubscriptionPlan } from "../../core/claude-plan";
@@ -29,7 +30,13 @@ interface CheckResult {
   label: string;
   ok: boolean;
   message: string;
+  /** Extra lines printed under the message, e.g. a connection's directory. */
+  details?: string[];
 }
+
+const LABEL_WIDTH = 24;
+/** Where the message column starts: "  ✓  " plus the padded label and a gap. */
+const DETAIL_INDENT = " ".repeat(2 + 1 + 2 + LABEL_WIDTH + 2);
 
 /**
  * Reads the sweep's state file directly rather than importing
@@ -300,15 +307,23 @@ async function runChecks(): Promise<CheckResult[]> {
   // The single most useful line when someone asks "why is my work not showing
   // up in the org dashboard" — almost always the answer is that the directory
   // was never connected, so the data went to the community server instead.
+  //
+  // Counted per server, so it reads as where the usage goes; each connection's
+  // own row below names its project and directory (#27).
   const v2 = loadConfigV2();
+  const perServer = new Map<string, number>();
+  for (const b of v2.bindings) {
+    const server = serverDisplayName(b.server);
+    perServer.set(server, (perServer.get(server) ?? 0) + 1);
+  }
   results.push({
     label: "Connected projects",
     ok: true,
     message:
-      v2.bindings.length === 0
-        ? "None — all usage goes to the community server"
-        : v2.bindings
-            .map((b) => `${b.project_label ?? b.abs_dir} -> ${b.server.label ?? b.server.app_base_url}`)
+      perServer.size === 0
+        ? "None — no directory sends usage to an organization"
+        : [...perServer]
+            .map(([server, n]) => `${n} director${n === 1 ? "y" : "ies"} -> ${server}`)
             .join("; "),
   });
 
@@ -337,8 +352,26 @@ async function runChecks(): Promise<CheckResult[]> {
   // device, left the organization, archived project) — both of which otherwise
   // end collection without a single visible error.
   for (const row of reportProjectCredentials(v2.bindings, loadProjectCredential)) {
-    results.push({ label: `Project ${row.label}`, ok: row.ok, message: row.message });
+    results.push({ label: `Project ${row.label}`, ok: row.ok, message: row.message, details: [row.dir] });
   }
+
+  // 8c. Collection scope
+  //
+  // Where everything not connected goes, and in listed scope whether anything
+  // does. Without it, "why is this directory's usage not on agentboard.cloud"
+  // has no answer here (#27). Never a failure: sending nothing is a choice.
+  const scope = describeCollectionScope(v2);
+  results.push({
+    label: "Collection scope",
+    ok: true,
+    message: `${scope.scope}: ${scope.headline}`,
+    details: [
+      ...(scope.note ? [scope.note] : []),
+      ...(scope.tracked.length > 0
+        ? [`${scope.trackedHeading}:`, ...scope.tracked.map((d) => `  ${d.abs_dir}  since ${d.added_at}`)]
+        : []),
+    ],
+  });
 
   // 9. Leftover /usage transcripts
   //
@@ -379,8 +412,11 @@ export async function doctorCommand(
 
   for (const result of results) {
     const icon = result.ok ? chalk.green("✓") : chalk.red("✗");
-    const label = result.label.padEnd(24);
+    const label = result.label.padEnd(LABEL_WIDTH);
     logger.plain(`  ${icon}  ${label}  ${chalk.dim(result.message)}`);
+    for (const line of result.details ?? []) {
+      logger.plain(`${DETAIL_INDENT}${chalk.dim(line)}`);
+    }
     if (!result.ok) allOk = false;
   }
 

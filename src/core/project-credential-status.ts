@@ -16,6 +16,7 @@ import type { Binding } from "./config-schema";
 import { getConfigDir } from "./config";
 import { decodeJwtClaims } from "./jwt";
 import { isProjectRenewalDue } from "./refresh-policy";
+import { serverDisplayName } from "./tracked-dirs";
 import {
   parseProjectCredentialFile,
   type ProjectCredential,
@@ -226,6 +227,12 @@ export function formatProjectCredential(
 
 export interface ProjectCredentialRow {
   label: string;
+  /**
+   * The connected directory. Two directories connected to the same project
+   * share a label, so this is what tells their rows apart (#27). Printed
+   * locally only, like everything else in config.json.
+   */
+  dir: string;
   ok: boolean;
   message: string;
 }
@@ -250,7 +257,11 @@ export function reportProjectCredentials(
       failures[b.credential_ref],
       upgrades[b.credential_ref]
     );
-    const where = b.server.label ?? b.server.app_base_url;
-    return { label: `${b.project_label ?? b.abs_dir} -> ${where}`, ok, message };
+    return {
+      label: `${b.project_label ?? b.abs_dir} -> ${serverDisplayName(b.server)}`,
+      dir: b.abs_dir,
+      ok,
+      message,
+    };
   });
 }
