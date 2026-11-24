@@ -10,7 +10,8 @@
  * Workflow:
  *   1. Read & delete the payload file
  *   2. Confirm it's a Claude Code session (detectSource; anything else is dropped)
- *   3. Resolve the route, then parse the transcript (incl.
+ *   3. Resolve the route; on Stop, wait briefly for the turn's last response
+ *      to reach the transcript; then parse it (incl.
  *      <session>/subagents/*.jsonl) for cumulative usage
  *   4. On SessionEnd, force a rate-limit snapshot (per-turn Stop stays throttled)
  *   5. Reduce to the delta since the last upload (dedup via hook-sent.json),
@@ -45,6 +46,12 @@ function workerLog(msg) {
 // so the timer itself never keeps the process alive.
 const WORKER_MAX_LIFETIME_MS = 60_000;
 
+// How long a Stop waits for the turn's last response to reach the transcript
+// (#25). Observed lags are 100–150ms; past this the rest goes with the next
+// hook, as it did before.
+const FINAL_RESPONSE_POLL_MS = 100;
+const FINAL_RESPONSE_MAX_WAIT_MS = 2_000;
+
 import {
   loadConfigV2,
   generateEventId,
@@ -60,7 +67,7 @@ import { isSweepEnabled, maybeSpawnSweep } from '../lib/sweep.mjs';
 import { registerDevice } from '../lib/transport.mjs';
 import { isRevokedDeviceError, revokedDeviceMessage } from '../lib/revoked.mjs';
 import { ForbiddenDataError } from '../lib/forbidden-data-guard.mjs';
-import { parseClaudeSession, convertLineCountedWatermark } from './parse-claude.mjs';
+import { parseClaudeSession, convertLineCountedWatermark, finalResponseWritten } from './parse-claude.mjs';
 import { captureUsageLimitSnapshot } from '../lib/usage-limit.mjs';
 import { bucketEventFields } from '../lib/usage-buckets.mjs';
 
@@ -162,6 +169,35 @@ async function uploadReregistering(ctx, events) {
     const verdict = await uploadWithContext(ctx, events, workerLog);
     workerLog('upload success after re-registration');
     return verdict;
+  }
+}
+
+/**
+ * Claude Code writes the transcript asynchronously, and Stop can fire before
+ * the turn's last response is on disk (#25). Parsed then, the upload would
+ * leave that response for the next hook — the next turn, or `/exit` — so a
+ * session looks like it used tokens after the conversation stopped. Nothing
+ * is lost either way: giving up just keeps that behavior.
+ */
+async function waitForFinalResponse(transcriptPath) {
+  const started = Date.now();
+  let polled = false;
+  for (;;) {
+    const written = finalResponseWritten(transcriptPath);
+    const waited = Date.now() - started;
+    if (written !== false) {
+      if (polled && written) workerLog(`final response reached the transcript after ${waited}ms`);
+      return;
+    }
+    if (waited >= FINAL_RESPONSE_MAX_WAIT_MS) {
+      workerLog(
+        `final response not in the transcript after ${waited}ms; sending what is there, the rest goes with the next hook`
+      );
+      return;
+    }
+    if (!polled) workerLog('waiting for the final response to reach the transcript');
+    polled = true;
+    await new Promise((resolve) => setTimeout(resolve, FINAL_RESPONSE_POLL_MS));
   }
 }
 
@@ -275,6 +311,14 @@ async function main() {
             ? ` handoff_from=${plan.from?.routeId ?? 'none'} split_at=${plan.splitAt}`
             : '')
   );
+
+  // 3.4 On Stop, let the turn's last response reach the transcript first.
+  // Before the lock, so a SessionEnd right behind this Stop is not turned
+  // away while this worker waits. SessionEnd needs no wait: it comes after
+  // the last turn was written.
+  if (source === 'claude_code' && payload.hook_event_name === 'Stop') {
+    await waitForFinalResponse(transcriptPath);
+  }
 
   // 3.5 One in-flight upload per session. Must be taken before reading the
   // sent-totals ledger: a concurrent worker that read the same totals would
