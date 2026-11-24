@@ -20,6 +20,7 @@ import { ApiError, createDefaultRouteClient } from "../../api/client";
 import { UsageSummary, UsageBySource } from "../../api/types";
 import { logger } from "../../core/logger";
 import { listAgentHomes } from "../../core/agent-homes";
+import { defaultServerName } from "../../core/tracked-dirs";
 import chalk from "chalk";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -169,6 +170,26 @@ export async function statusCommand(): Promise<void> {
     }
     logger.plain("");
   }
+
+  // ── Collection scope ─────────────────────────────────────────────────────
+  // In listed scope most directories send nothing, which otherwise looks like
+  // collection silently stopped.
+  const scopeConfig = loadConfigV2();
+  const serverName = defaultServerName(scopeConfig);
+  logger.plain(chalk.bold("Collection scope"));
+  logger.plain("─".repeat(40));
+  if (scopeConfig.default_scope === "listed") {
+    logger.plain(`  ${chalk.yellow("listed")}  ${chalk.dim(`only these directories send usage to ${serverName}`)}`);
+    if (scopeConfig.tracked_dirs.length === 0) {
+      logger.plain(chalk.yellow(`  !  none — nothing goes to ${serverName}. Run \`agentboard track <dir>\`.`));
+    }
+    for (const dir of scopeConfig.tracked_dirs) {
+      logger.plain(`  ${chalk.green("✔")}  ${dir.abs_dir}  ${chalk.dim(`since ${dir.added_at}`)}`);
+    }
+  } else {
+    logger.plain(`  ${chalk.green("all")}  ${chalk.dim(`every directory not connected to an organization sends usage to ${serverName}`)}`);
+  }
+  logger.plain("");
 
   // ── Hook registration status ─────────────────────────────────────────────
   logger.plain(chalk.bold("Hooks"));

@@ -134,3 +134,51 @@ describe('splitBucketedDelta at a connection', () => {
     expect(later.pieces[0].key.model).toBe(KEY.model);
   });
 });
+
+// #23: in "listed" scope a tracked directory sends only what was used after
+// it was added. Earlier tokens are withheld: never sent, but covered once a
+// later upload lands.
+describe('splitBucketedDelta with since', () => {
+  const parsed = session([
+    { ts: '2026-11-20T10:00:00.000Z', turn: turn(1_000, 100) },
+    { ts: '2026-11-20T11:00:00.000Z', turn: turn(2_000, 200) },
+    { ts: '2026-11-20T13:00:00.000Z', turn: turn(4_000, 400) },
+  ]);
+  const zero = turn(0, 0);
+  const total = (pieces) => pieces.reduce((n, p) => n + p.totalTokens, 0);
+
+  it('sends only what came after since, and records everything as covered', () => {
+    const { earlier, later } = splitBucketedDelta(parsed, {}, { since: '2026-11-20T10:30:00.000Z' });
+    expect(earlier).toBeNull();
+    expect(total(later.pieces)).toBe(2_200 + 4_400);
+    expect(later.pieces.every((p) => p.startedAt >= '2026-11-20T10:30:00.000Z')).toBe(true);
+    expect(later.record[KS].totalTokens).toBe(parsed.totalTokens);
+    expect(later.watermarks[KS].totalTokens).toBe(1_100);
+  });
+
+  it('does not withhold twice what the ledger already covers', () => {
+    const { later } = splitBucketedDelta(parsed, { [KS]: turn(3_000, 300) }, { since: '2026-11-20T10:30:00.000Z' });
+    expect(total(later.pieces)).toBe(4_400);
+  });
+
+  it('withholds only the community side of a hand-off', () => {
+    const { earlier, later } = splitBucketedDelta(parsed, { [KS]: zero }, {
+      since: '2026-11-20T10:30:00.000Z',
+      splitAt: '2026-11-20T12:00:00.000Z',
+    });
+    expect(total(earlier.pieces)).toBe(2_200);
+    expect(total(later.pieces)).toBe(4_400);
+    expect(earlier.record[KS].totalTokens).toBe(1_100 + 2_200);
+  });
+
+  // A directory tracked after it was connected: the organization still gets
+  // everything after the connection.
+  it('never withholds past the connection', () => {
+    const { earlier, later } = splitBucketedDelta(parsed, { [KS]: zero }, {
+      since: '2026-11-21T00:00:00.000Z',
+      splitAt: '2026-11-20T12:00:00.000Z',
+    });
+    expect(earlier.pieces).toEqual([]);
+    expect(total(later.pieces)).toBe(4_400);
+  });
+});
