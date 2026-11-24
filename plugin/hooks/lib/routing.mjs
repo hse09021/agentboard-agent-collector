@@ -10,6 +10,13 @@ import { normalizePath, isPathPrefix } from './path-normalize.mjs';
 
 export const DEFAULT_ROUTE_ID = 'default';
 
+/** Nothing is sent for this session: listed scope, and its cwd is not tracked. */
+export const SKIP_NOT_TRACKED = Object.freeze({ kind: 'skip', reason: 'not_tracked' });
+
+/**
+ * Longest-prefix match over directory entries — bindings, or tracked dirs. Both
+ * the literal and the realpath form are compared.
+ */
 export function matchBinding(bindings, cwd) {
   const target = normalizePath(cwd);
   if (!target) return null;
@@ -57,8 +64,21 @@ function validInstant(iso) {
   return typeof iso === 'string' && Number.isFinite(Date.parse(iso)) ? iso : null;
 }
 
+/**
+ * Where an unconnected directory's usage goes: the default server, or — in
+ * "listed" scope — the default server only for a tracked directory, and only
+ * for what was used after it was added (`since`). Null means nowhere.
+ */
+function communityRoute(config, cwd) {
+  if (config.default_scope !== 'listed') return defaultRoute(config);
+  const tracked = matchBinding(config.tracked_dirs, cwd);
+  const since = tracked ? validInstant(tracked.added_at) : null;
+  return since ? { ...defaultRoute(config), since } : null;
+}
+
 export function resolveRoute({ config, cwd, pinnedRouteId }) {
   const binding = matchBinding(config.bindings, cwd);
+  const community = communityRoute(config, cwd);
 
   // A session that has only ever gone to the community server, now working in
   // a connected directory, is handed off at the moment of connection: tokens
@@ -73,19 +93,25 @@ export function resolveRoute({ config, cwd, pinnedRouteId }) {
   // one goes by cwd as before: reconnecting a directory resets `connected_at`,
   // and a session that could not upload under the old connection would have
   // its organization work filed as pre-connect and sent to the community.
+  //
+  // In "listed" scope the pre-connect tokens go to the community server only if
+  // the directory is tracked, and only from when it was; otherwise `from` is
+  // null and they are sent nowhere.
   const splitAt = binding ? validInstant(binding.connected_at) : null;
   if (binding && pinnedRouteId === DEFAULT_ROUTE_ID && splitAt) {
-    return { kind: 'handoff', from: defaultRoute(config), to: bindingRoute(binding), splitAt };
+    return { kind: 'handoff', from: community, to: bindingRoute(binding), splitAt };
   }
 
-  // Otherwise a pinned session stays where it is. A session pinned to an
-  // organization keeps going there wherever the user works next, and one whose
-  // binding is gone is blocked rather than sent somewhere else.
-  if (pinnedRouteId) return routeForId(config, pinnedRouteId);
+  // A session pinned to an organization keeps going there wherever the user
+  // works next, and one whose binding is gone is blocked rather than sent
+  // somewhere else.
+  if (pinnedRouteId && pinnedRouteId !== DEFAULT_ROUTE_ID) return routeForId(config, pinnedRouteId);
 
-  if (binding) return bindingRoute(binding);
+  if (binding && !pinnedRouteId) return bindingRoute(binding);
 
-  // Connecting a directory to an organization never changes where
-  // unconnected work goes.
-  return defaultRoute(config);
+  // Everything else is the community server's — decided afresh on every
+  // upload, pinned or not, so that untracking a directory in "listed" scope
+  // stops its sessions at once. Connecting a directory to an organization never
+  // changes where unconnected work goes.
+  return community ?? SKIP_NOT_TRACKED;
 }

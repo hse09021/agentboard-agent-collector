@@ -267,8 +267,13 @@ async function main() {
   }
 
   workerLog(
-    `route=${plan.route.routeId} api=${plan.route.server.api_base_url} pinned=${plan.pinnedRoute ?? 'none'}` +
-      (plan.kind === 'handoff' ? ` handoff_from=${plan.from.routeId} split_at=${plan.splitAt}` : '')
+    plan.kind === 'skip'
+      ? `route=none (directory not tracked, listed scope) pinned=${plan.pinnedRoute ?? 'none'}`
+      : `route=${plan.route.routeId} api=${plan.route.server.api_base_url} pinned=${plan.pinnedRoute ?? 'none'}` +
+          (plan.route.since ? ` since=${plan.route.since}` : '') +
+          (plan.kind === 'handoff'
+            ? ` handoff_from=${plan.from?.routeId ?? 'none'} split_at=${plan.splitAt}`
+            : '')
   );
 
   // 3.5 One in-flight upload per session. Must be taken before reading the
@@ -316,9 +321,10 @@ async function main() {
   // 10-min throttle so the resting 5h/weekly value reflects the true
   // end-of-session state rather than a reading up to 10 min stale; per-turn Stop
   // invocations stay throttled. Throttled under the route new usage goes to,
-  // which is also the route the snapshot is attached to.
+  // which is also the route the snapshot is attached to. A session "listed"
+  // scope does not collect sends no snapshot either, so `/usage` is not run.
   let usageSnapshot = null;
-  if (source === 'claude_code') {
+  if (source === 'claude_code' && plan.kind !== 'skip') {
     try {
       const forceCapture = payload.hook_event_name === 'SessionEnd';
       const route = plan.route.routeId;
@@ -373,6 +379,11 @@ async function main() {
     workerLog(`ERROR: upload failed: ${err.message}`);
     process.stderr.write(`agentboard-worker: upload failed: ${err.message}\n`);
     process.exit(1);
+  }
+
+  if (outcome.status === 'untracked') {
+    workerLog('done (not tracked)');
+    process.exit(0);
   }
 
   if (outcome.status === 'nothing') {

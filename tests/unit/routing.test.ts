@@ -250,6 +250,99 @@ describe("resolveRoute", () => {
   });
 });
 
+// #23: "listed" scope sends only tracked directories to the community server,
+// and only what was used after each was added. "all", the default, is the
+// behaviour above.
+describe("resolveRoute in listed scope", () => {
+  let root: string;
+  let api: string;
+  let side: string;
+
+  beforeEach(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agentboard-scope-")));
+    api = path.join(root, "api");
+    side = path.join(root, "side");
+    fs.mkdirSync(api, { recursive: true });
+    fs.mkdirSync(path.join(side, "src"), { recursive: true });
+  });
+
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const ADDED = "2026-11-24T00:00:00.000Z";
+  const listed = (bindings: Binding[], tracked: string[]): CollectorConfigV2 => ({
+    ...config(bindings),
+    default_scope: "listed",
+    tracked_dirs: tracked.map((dir) => ({ abs_dir: dir, real_dir: dir, added_at: ADDED })),
+  });
+
+  it("sends a tracked directory, and below it, only from when it was added", () => {
+    const route = resolveRoute({ config: listed([], [side]), cwd: path.join(side, "src") });
+    expect(route).toMatchObject({ kind: "send", routeId: DEFAULT_ROUTE_ID, since: ADDED });
+  });
+
+  it("sends nothing for an untracked directory", () => {
+    expect(resolveRoute({ config: listed([], [side]), cwd: root })).toEqual({ kind: "skip", reason: "not_tracked" });
+  });
+
+  it("sends nothing when the cwd is unknown", () => {
+    expect(resolveRoute({ config: listed([], [side]), cwd: null })).toMatchObject({ kind: "skip" });
+  });
+
+  // Untracking must stop a session that was already uploading.
+  it("re-checks a community-pinned session against the list", () => {
+    const route = resolveRoute({ config: listed([], []), cwd: side, pinnedRouteId: DEFAULT_ROUTE_ID });
+    expect(route).toMatchObject({ kind: "skip" });
+  });
+
+  it("leaves connected directories and organization pins alone", () => {
+    const cfg = listed([binding(api)], []);
+    expect(resolveRoute({ config: cfg, cwd: api })).toMatchObject({ kind: "send", routeId: "acme-ref" });
+    expect(resolveRoute({ config: cfg, cwd: root, pinnedRouteId: "acme-ref" })).toMatchObject({
+      kind: "send",
+      routeId: "acme-ref",
+    });
+  });
+
+  it("hands off with no community side when the connected directory is not tracked", () => {
+    const route = resolveRoute({ config: listed([binding(api)], []), cwd: api, pinnedRouteId: DEFAULT_ROUTE_ID });
+    expect(route).toMatchObject({ kind: "handoff", from: null, to: { routeId: "acme-ref" } });
+  });
+
+  it("hands off the tracked part of the pre-connect side when it is tracked", () => {
+    const route = resolveRoute({ config: listed([binding(api)], [api]), cwd: api, pinnedRouteId: DEFAULT_ROUTE_ID });
+    expect(route).toMatchObject({ kind: "handoff", from: { routeId: DEFAULT_ROUTE_ID, since: ADDED } });
+  });
+
+  it("ignores the list in all scope", () => {
+    const route = resolveRoute({ config: { ...listed([], []), default_scope: "all" }, cwd: root });
+    expect(route).toMatchObject({ kind: "send", routeId: DEFAULT_ROUTE_ID });
+    if (route.kind === "send") expect(route.since).toBeUndefined();
+  });
+
+  it("does not track an entry whose added_at is unusable", () => {
+    const cfg = listed([], []);
+    cfg.tracked_dirs = [{ abs_dir: side, real_dir: side, added_at: "soon" }];
+    expect(resolveRoute({ config: cfg, cwd: side })).toMatchObject({ kind: "skip" });
+  });
+
+  it("agrees with the hook runtime's copy", async () => {
+    const hook = await import("../../plugin/hooks/lib/routing.mjs");
+    const cases = [
+      { cfg: listed([], [side]), cwd: side, pinnedRouteId: null },
+      { cfg: listed([], [side]), cwd: root, pinnedRouteId: null },
+      { cfg: listed([], [side]), cwd: null, pinnedRouteId: DEFAULT_ROUTE_ID },
+      { cfg: listed([], []), cwd: side, pinnedRouteId: DEFAULT_ROUTE_ID },
+      { cfg: listed([binding(api)], []), cwd: api, pinnedRouteId: DEFAULT_ROUTE_ID },
+      { cfg: listed([binding(api)], [api]), cwd: api, pinnedRouteId: DEFAULT_ROUTE_ID },
+      { cfg: listed([binding(api)], []), cwd: root, pinnedRouteId: "acme-ref" },
+    ];
+    for (const { cfg, ...rest } of cases) {
+      const input = { config: cfg, ...rest };
+      expect(hook.resolveRoute(input), JSON.stringify(rest)).toEqual(resolveRoute(input));
+    }
+  });
+});
+
 describe("normalizePath", () => {
   it("strips trailing separators", () => {
     expect(normalizePath("/a/b/")).toBe(normalizePath("/a/b"));

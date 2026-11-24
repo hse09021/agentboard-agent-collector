@@ -226,25 +226,34 @@ export function allocateWatermarkByTime(entries, totals) {
 
 /**
  * A session's outstanding delta, per bucket key (see usage-buckets.mjs) and
- * calendar day, optionally cut at the moment its directory was connected.
+ * calendar day, optionally cut at the moment its directory was connected and
+ * optionally without what came before `since`.
  *
  * Each key is its own small session: its responses become day buckets and
  * splitDeltaByDate charges that key's watermark against them. Every piece
  * carries its `key` and `keyString`, so it becomes an event priced as that
  * model, speed and prompt-size tier.
  *
- * With `splitAt` (a hand-off, see resolveRoute) each key is also cut at that
- * instant, field by field:
+ * Each key's responses fall into up to three windows, in time order:
  *
- *   before   = the key's tokens from before `splitAt`
- *   earlier  = before − sent                     (the pre-connect tail not yet sent)
- *   later    = cumulative − max(sent, before)
+ *   withheld  before `since` (and before `splitAt`) — never sent (#23: a
+ *             directory tracked later sends only what came after)
+ *   earlier   from `since` to `splitAt` — the pre-connect side of a hand-off
+ *   later     everything else
  *
- * `later` charges `max(sent, before)` against all of the key's buckets in time
- * order; that always covers every pre-connect bucket, so only post-connect
- * tokens remain. Post-connect tokens an older collector already sent to the
- * community server are absorbed by the max: they cannot be recalled, but are
- * not sent twice.
+ * and, field by field, with `sent` the key's watermark:
+ *
+ *   earlier  = window − (sent − withheld)                  (not yet sent)
+ *   later    = cumulative − max(sent, withheld + earlier)
+ *
+ * Both are splitDeltaByDate over the windows in time order, charged with the
+ * watermark that covers everything before them — that premise (what was sent
+ * is the earliest tokens) is what makes this exact. Withheld tokens count as
+ * covered, so they are never sent by either side. Post-connect tokens an older
+ * collector already sent to the community server are absorbed by the max: they
+ * cannot be recalled, but are not sent twice.
+ *
+ * Without `splitAt` there is a single (`later`) side after the withheld window.
  *
  * Each side returns its pieces, the per-key watermark their event ids derive
  * from, and `record` — the per-key ledger once that side has landed. Keys the
@@ -252,16 +261,17 @@ export function allocateWatermarkByTime(entries, totals) {
  *
  * Without per-response entries (an unexpected parse result) there is nothing
  * to key or cut by: the whole flat delta becomes one key under the session's
- * model, on the post-connect side.
+ * model, on the `later` side.
  *
  * @param {object} parsed - parser output carrying `entries`
  * @param {Record<string, object>} sentByKey - per-key totals already uploaded
- * @param {string|null} [splitAt] - ISO-8601 instant of the connection
+ * @param {{since?: string|null, splitAt?: string|null}} [cuts] - ISO-8601
+ *   instants: withhold what came before `since`; split the rest at `splitAt`
  * @returns {{earlier: object|null, later: object}} each
  *   `{pieces, watermarks: {keyString: totals}, record: {keyString: totals}}`;
  *   `earlier` is null without `splitAt`
  */
-export function splitBucketedDelta(parsed, sentByKey, splitAt = null) {
+export function splitBucketedDelta(parsed, sentByKey, { since = null, splitAt = null } = {}) {
   const earlier = splitAt ? { pieces: [], watermarks: {}, record: { ...sentByKey } } : null;
   const later = { pieces: [], watermarks: {}, record: { ...sentByKey } };
 
@@ -282,31 +292,46 @@ export function splitBucketedDelta(parsed, sentByKey, splitAt = null) {
     groups.get(keyString).entries.push(entry);
   }
 
-  const cut = splitAt ? Date.parse(splitAt) : null;
+  const splitCut = splitAt ? Date.parse(splitAt) : Infinity;
+  // Withholding never reaches past a connection: what came after it belongs to
+  // the organization whatever the community side's `since` says.
+  const withholdCut = since ? Math.min(Date.parse(since), splitCut) : -Infinity;
+  const windowOf = (entry) => {
+    const ts = Date.parse(entry.ts);
+    if (ts < withholdCut) return 0;
+    if (ts < splitCut) return 1;
+    return 2;
+  };
+  const maxOf = (a, b) => Object.fromEntries(TOKEN_FIELDS.map((f) => [f, Math.max(a[f], b[f])]));
+
   for (const [keyString, { key, entries }] of groups) {
     const sent = normalizeTotals(sentByKey?.[keyString]);
     const tag = (pieces) => pieces.map((piece) => ({ ...piece, key, keyString }));
 
+    const windows = [[], [], []];
+    for (const entry of entries) windows[windowOf(entry)].push(entry);
+    const [withheld, middle, rest] = windows.map(bucketEntriesByDay);
+
+    // Everything before each side, as a watermark.
+    const beforeMiddle = maxOf(sent, sumBuckets(withheld));
+    const beforeRest = maxOf(sent, sumBuckets([...withheld, ...middle]));
+    const cumulative = sumBuckets([...withheld, ...middle, ...rest]);
+
     if (!splitAt) {
-      const buckets = bucketEntriesByDay(entries);
-      later.pieces.push(...tag(splitDeltaByDate(buckets, sent)));
-      later.watermarks[keyString] = sent;
-      later.record[keyString] = sumBuckets(buckets);
+      // No connection: `middle` and `rest` are one window, sent together.
+      later.pieces.push(...tag(splitDeltaByDate([...withheld, ...middle, ...rest], beforeMiddle)));
+      later.watermarks[keyString] = beforeMiddle;
+      later.record[keyString] = cumulative;
       continue;
     }
 
-    const beforeBuckets = bucketEntriesByDay(entries.filter((e) => Date.parse(e.ts) < cut));
-    const afterBuckets = bucketEntriesByDay(entries.filter((e) => !(Date.parse(e.ts) < cut)));
-    const before = sumBuckets(beforeBuckets);
-    const covered = Object.fromEntries(TOKEN_FIELDS.map((f) => [f, Math.max(sent[f], before[f])]));
+    earlier.pieces.push(...tag(splitDeltaByDate([...withheld, ...middle], beforeMiddle)));
+    earlier.watermarks[keyString] = beforeMiddle;
+    earlier.record[keyString] = beforeRest;
 
-    earlier.pieces.push(...tag(splitDeltaByDate(beforeBuckets, sent)));
-    earlier.watermarks[keyString] = sent;
-    earlier.record[keyString] = covered;
-
-    later.pieces.push(...tag(splitDeltaByDate([...beforeBuckets, ...afterBuckets], covered)));
-    later.watermarks[keyString] = covered;
-    later.record[keyString] = sumBuckets([...beforeBuckets, ...afterBuckets]);
+    later.pieces.push(...tag(splitDeltaByDate([...withheld, ...middle, ...rest], beforeRest)));
+    later.watermarks[keyString] = beforeRest;
+    later.record[keyString] = cumulative;
   }
 
   // Day first, then key: the order events are built and uploaded in.

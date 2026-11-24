@@ -100,6 +100,33 @@ program
     await sweepCommand(mode);
   });
 
+program
+  .command("scope")
+  .description("Show or change which directories send usage to the AgentBoard server (all by default)")
+  .argument("[mode]", "all | listed — omit to show the current scope and tracked directories")
+  .action(async (mode?: string) => {
+    const { scopeCommand } = await import("./commands/scope");
+    await scopeCommand(mode);
+  });
+
+program
+  .command("track")
+  .argument("[dir]", "Directory to track (defaults to the current one)", ".")
+  .description("Send this directory's usage to the AgentBoard server in listed scope")
+  .action(async (dir: string) => {
+    const { trackCommand } = await import("./commands/scope");
+    await trackCommand(dir);
+  });
+
+program
+  .command("untrack")
+  .argument("[dir]", "Directory to stop tracking (defaults to the current one)", ".")
+  .description("Stop sending this directory's usage in listed scope")
+  .action(async (dir: string) => {
+    const { untrackCommand } = await import("./commands/scope");
+    await untrackCommand(dir);
+  });
+
 program.parseAsync(process.argv).catch((err) => {
   console.error("Error:", (err as Error).message);
   process.exit(1);

@@ -145,7 +145,7 @@ describe('splitBucketedDelta', () => {
   });
 
   it('cuts every key at a connection', () => {
-    const { earlier, later } = splitBucketedDelta(parsed, {}, '2026-11-20T10:30:00.000Z');
+    const { earlier, later } = splitBucketedDelta(parsed, {}, { splitAt: '2026-11-20T10:30:00.000Z' });
     expect(byPiece(earlier.pieces)).toEqual([
       ['2026-11-20', 'claude-haiku-5-5', 'standard', 202],
       ['2026-11-20', 'claude-opus-5-5', 'standard', 1_010],

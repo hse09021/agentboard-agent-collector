@@ -108,6 +108,7 @@ export function loadConfigV2() {
       // Unknown values coerce to the documented default rather than throwing:
       // a typo in a hand-edited config must not silently stop collection.
       sweep: raw.sweep === 'off' ? 'off' : 'registered',
+      ...normalizeScope(raw),
     };
   }
 
@@ -137,7 +138,29 @@ export function loadConfigV2() {
     bindings: [],
     snapshot_target: 'routed',
     sweep: 'registered',
+    default_scope: 'all',
+    tracked_dirs: [],
   };
+}
+
+/**
+ * Which unconnected directories send usage to the default server (#23).
+ * Mirrors normalizeDefaultScope / normalizeTrackedDirs in
+ * src/core/config-schema.ts. Only an explicit "listed" narrows collection; a
+ * missing or unknown value is "all", the behaviour every install had before.
+ */
+function normalizeScope(raw) {
+  const scope =
+    typeof raw?.default_scope === 'string' && raw.default_scope.trim().toLowerCase() === 'listed'
+      ? 'listed'
+      : 'all';
+  const trackedDirs = (Array.isArray(raw?.tracked_dirs) ? raw.tracked_dirs : [])
+    .filter(
+      (d) =>
+        d && typeof d === 'object' && typeof d.abs_dir === 'string' && d.abs_dir && typeof d.added_at === 'string'
+    )
+    .map((d) => ({ abs_dir: d.abs_dir, real_dir: d.real_dir || d.abs_dir, added_at: d.added_at }));
+  return { default_scope: scope, tracked_dirs: trackedDirs };
 }
 
 function normalizeServerRef(server) {
@@ -668,6 +691,43 @@ export function markTotalsSentMonotonic(source, sessionId, totals, route, bucket
     ...(byKey ? { buckets: byKey } : {}),
     ...countingMarker(source),
     ...(route ?? previous?.route ? { route: route ?? previous.route } : {}),
+  };
+  saveHookSent(sent);
+}
+
+/**
+ * Advance a session's watermark over tokens that are never to be sent (#23):
+ * the session works in a directory "listed" scope does not track.
+ *
+ * Recording them is what makes untracking, tracking a directory later, or
+ * switching back to "all" never ship what accrued while it was not collected —
+ * those tokens are already behind the watermark. Per-field and per-key
+ * maximum, as in markTotalsSentMonotonic, so it never moves backwards.
+ *
+ * The record keeps its route. A session that has never uploaded is written as
+ * seeded, so it stays unpinned (see getSentRoute): no server has seen it.
+ */
+export function markTotalsWithheld(source, sessionId, totals, buckets) {
+  const sent = loadHookSent();
+  const key = hookSentKey(source, sessionId);
+  const previous = sent[key];
+
+  let byKey = normalizeBuckets(buckets);
+  const priorBuckets = normalizeBuckets(previous?.buckets);
+  if (byKey && priorBuckets) {
+    for (const [bucket, totalsForKey] of Object.entries(priorBuckets)) {
+      byKey[bucket] = byKey[bucket] ? maxTotals(byKey[bucket], totalsForKey) : totalsForKey;
+    }
+  } else if (!byKey) {
+    byKey = priorBuckets;
+  }
+
+  sent[key] = {
+    ...(previous ?? { seeded: true }),
+    sentAt: new Date().toISOString(),
+    totals: maxTotals(normalizeTotals(previous?.totals), normalizeTotals(totals)),
+    ...(byKey ? { buckets: byKey } : {}),
+    ...countingMarker(source),
   };
   saveHookSent(sent);
 }

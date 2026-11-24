@@ -17,6 +17,7 @@ import {
   getSentRecord,
   markTotalsSent,
   markTotalsSentMonotonic,
+  markTotalsWithheld,
 } from './config.mjs';
 import { resolveRoute } from './routing.mjs';
 import { ensureFreshToken } from './token-refresh.mjs';
@@ -31,7 +32,13 @@ import { assertNoForbiddenFields, sanitizeRawOutput } from './forbidden-data-gua
  * Where a session's usage goes, decided without touching any credential.
  *
  * `route` is where new usage goes. For a hand-off (see resolveRoute) `from` is
- * the community route that keeps the tokens from before `splitAt`.
+ * the community route that keeps the tokens from before `splitAt` — null when
+ * "listed" scope sends them nowhere. A route may carry `since`: what came
+ * before it is never sent there.
+ *
+ * `kind: 'skip'` means nothing is sent for this session at all ("listed" scope,
+ * cwd not tracked); `route` is then null. uploadSessionDelta records its tokens
+ * as never to be sent.
  *
  * Fails only when nothing could be sent at all: a pinned route that is gone,
  * or no credential for any route involved.
@@ -52,6 +59,10 @@ export function resolveUploadPlan({ source, sessionId, cwd }) {
     // meant to go; the tokens stay in the ledger and are recovered if the
     // binding comes back.
     return { ok: false, reason: `session pinned to a missing route (${pinnedRoute})` };
+  }
+
+  if (resolved.kind === 'skip') {
+    return { ok: true, kind: 'skip', config, pinnedRoute, route: null, from: null, splitAt: null };
   }
 
   const route = resolved.kind === 'handoff' ? resolved.to : resolved;
@@ -100,6 +111,7 @@ function contextForRoute(config, route) {
 export function resolveUploadContext(input) {
   const plan = resolveUploadPlan(input);
   if (!plan.ok) return plan;
+  if (plan.kind === 'skip') return { ok: false, reason: 'directory not tracked (listed scope)' };
   const context = contextForRoute(plan.config, plan.route);
   return context.ok ? { ...context, pinnedRoute: plan.pinnedRoute } : context;
 }
@@ -233,17 +245,23 @@ export async function uploadWithContext(context, events, log = () => {}, uploade
  * the same thing: after the first leg each key sits at `max(sent, before)` on
  * the default route, so the next attempt has no tail left and an identical
  * second leg, ids included.
+ *
+ * Tokens before the community route's `since` ("listed" scope) are withheld:
+ * neither leg sends them, and whichever leg lands records them as covered. A
+ * hand-off whose `from` is null sends its pre-connect tail nowhere at all.
  */
 function planLegs(plan, parsed, sentByKey) {
   if (!parsed) return [{ route: plan.route, pieces: [], watermarks: {}, record: null, primary: true }];
 
-  const { earlier, later } = splitBucketedDelta(
-    parsed,
-    sentByKey,
-    plan.kind === 'handoff' ? plan.splitAt : null
-  );
+  const handoff = plan.kind === 'handoff';
+  const community = handoff ? plan.from : plan.route.credentialRef === null ? plan.route : null;
+  const { earlier, later } = splitBucketedDelta(parsed, sentByKey, {
+    // A null `from` withholds the whole pre-connect side.
+    since: handoff && !plan.from ? plan.splitAt : (community?.since ?? null),
+    splitAt: handoff ? plan.splitAt : null,
+  });
   const legs = [];
-  if (earlier) legs.push({ route: plan.from, ...earlier, primary: false });
+  if (earlier && plan.from) legs.push({ route: plan.from, ...earlier, primary: false });
   legs.push({ route: plan.route, ...later, primary: true });
   return legs;
 }
@@ -313,7 +331,7 @@ function describePieces(pieces) {
  * @param {(ctx: object, events: object[]) => Promise<object>} [opts.upload]
  * @param {(msg: string) => void} [opts.log]
  * @returns {Promise<{
- *   status: 'nothing' | 'sent' | 'held' | 'skipped',
+ *   status: 'nothing' | 'sent' | 'held' | 'skipped' | 'untracked',
  *   tokens: number,
  *   uploads: Array<{routeId: string, events: object[], verdict: object}>,
  *   skipped: Array<{routeId: string, reason: string, tokens: number}>,
@@ -334,6 +352,20 @@ export async function uploadSessionDelta(plan, opts) {
   const record = monotonic ? markTotalsSentMonotonic : markTotalsSent;
 
   const sentRecord = getSentRecord(source, ledgerKey);
+
+  // "listed" scope, cwd not tracked: nothing is sent, not even a usage
+  // snapshot, and what the session has used so far is recorded as never to be
+  // sent — so untracking stops it at once, and tracking the directory later or
+  // switching back to "all" never ships what accrued meanwhile.
+  if (plan.kind === 'skip') {
+    if (parsed) {
+      const { later } = splitBucketedDelta(parsed, sentByBucket(sentRecord, parsed, log));
+      markTotalsWithheld(source, ledgerKey, sumByKey(later.record), later.record);
+      log(`SKIP: directory not tracked (listed scope) — ${parsed.totalTokens} tokens withheld`);
+    }
+    return { status: 'untracked', tokens: 0, uploads: [], skipped: [] };
+  }
+
   const legs = planLegs(plan, parsed, parsed ? sentByBucket(sentRecord, parsed, log) : {});
   const alreadySent = sentRecord.totals.totalTokens;
 

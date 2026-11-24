@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -179,3 +179,69 @@ describe('uploadSessionDelta hand-off', () => {
     expect(ledgerEntry()).toMatchObject({ route: 'default', totals: { totalTokens: 100 } });
   });
 });
+
+// #23: "listed" scope. Each test rewrites config.json, so the plan is read
+// fresh from it.
+describe('uploadSessionDelta in listed scope', () => {
+  function setScope(scope, tracked = []) {
+    const path = join(configDir, 'config.json');
+    const current = JSON.parse(readFileSync(path, 'utf-8'));
+    writeFileSync(path, JSON.stringify({ ...current, bindings: [], default_scope: scope, tracked_dirs: tracked }));
+  }
+  const plan = () => lib.resolveUploadPlan({ source: 'claude_code', sessionId: 's1', cwd: '/elsewhere' });
+
+  it('uploads nothing for an untracked directory and withholds its tokens', async () => {
+    setScope('listed');
+    const { calls, upload } = recorder();
+    const outcome = await lib.uploadSessionDelta(plan(), {
+      source: 'claude_code',
+      ledgerKey: 's1',
+      parsed,
+      buildEvent,
+      upload,
+      snapshot: { raw: 'ok' },
+      buildSnapshotOnlyEvent: () => ({}),
+    });
+
+    expect(outcome.status).toBe('untracked');
+    expect(calls).toEqual([]);
+    // The pin from the earlier community upload is kept; the tokens are behind
+    // the watermark now.
+    expect(ledgerEntry()).toMatchObject({ route: 'default', totals: { totalTokens: 700 } });
+    expect(ledgerEntry().seeded).toBeUndefined();
+  });
+
+  it('leaves a session that never uploaded unpinned', async () => {
+    setScope('listed');
+    const { upload } = recorder();
+    await lib.uploadSessionDelta(lib.resolveUploadPlan({ source: 'claude_code', sessionId: 'fresh', cwd: '/elsewhere' }), {
+      source: 'claude_code',
+      ledgerKey: 'fresh',
+      parsed,
+      buildEvent,
+      upload,
+    });
+    expect(config.loadHookSent()['claude_code:fresh']).toMatchObject({ seeded: true, totals: { totalTokens: 700 } });
+    expect(config.getSentRoute('claude_code', 'fresh')).toBeNull();
+  });
+
+  it('sends nothing withheld once the scope is back to all', async () => {
+    setScope('listed');
+    await lib.uploadSessionDelta(plan(), { source: 'claude_code', ledgerKey: 's1', parsed, buildEvent, upload: recorder().upload });
+
+    setScope('all');
+    const more = { ...turn(900), model: 'm', entries: [...parsed.entries, { ts: '2026-11-20T14:00:00.000Z', turn: turn(200) }] };
+    const { calls, upload } = recorder();
+    await lib.uploadSessionDelta(plan(), { source: 'claude_code', ledgerKey: 's1', parsed: more, buildEvent, upload });
+    expect(calls.map((c) => c.events.reduce((n, e) => n + e.total_tokens, 0))).toEqual([200]);
+  });
+
+  it('sends a tracked directory only what came after it was added', async () => {
+    setScope('listed', [{ abs_dir: '/elsewhere', real_dir: '/elsewhere', added_at: '2026-11-20T12:00:00.000Z' }]);
+    const { calls, upload } = recorder();
+    await lib.uploadSessionDelta(plan(), { source: 'claude_code', ledgerKey: 's1', parsed, buildEvent, upload });
+    expect(calls.map((c) => [c.routeId, c.events.reduce((n, e) => n + e.total_tokens, 0)])).toEqual([['default', 400]]);
+    expect(ledgerEntry()).toMatchObject({ route: 'default', totals: { totalTokens: 700 } });
+  });
+});
+

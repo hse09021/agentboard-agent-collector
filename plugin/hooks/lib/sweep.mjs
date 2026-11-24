@@ -446,6 +446,10 @@ export async function sweepOneSession(candidate, ctx = {}) {
     if (outcome.status === 'held') {
       return { status: 'error', sessionId, error: 'server rejected retriably' };
     }
+    // "listed" scope and its directory is not tracked: recorded as withheld.
+    if (outcome.status === 'untracked') {
+      return { status: 'untracked', sessionId };
+    }
     if (outcome.uploads.length === 0) {
       return { status: 'nocred', sessionId };
     }
@@ -478,7 +482,7 @@ export async function runSweep(opts = {}) {
     seeded: 0,
     tokens: 0,
     errors: 0,
-    skipped: { cached: 0, locked: 0, nodelta: 0, noroute: 0, nocred: 0, toobig: 0, excluded: 0 },
+    skipped: { cached: 0, locked: 0, nodelta: 0, noroute: 0, nocred: 0, toobig: 0, excluded: 0, untracked: 0 },
     timedOut: false,
   };
 
