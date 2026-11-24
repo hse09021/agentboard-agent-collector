@@ -212,12 +212,30 @@ describe("reportProjectCredentials", () => {
 
     expect(rows).toEqual([
       {
-        label: "billing-api -> Acme",
+        label: "billing-api -> Acme (acme)",
+        dir: "/work/billing-api",
         ok: false,
         message: "this device was revoked on the server; uploads are blocked — run `agentboard connect /work/billing-api` again",
       },
-      { label: "web -> Acme", ok: true, message: "renews automatically (expires 2026-11-12)" },
+      {
+        label: "web -> Acme (acme)",
+        dir: "/work/web",
+        ok: true,
+        message: "renews automatically (expires 2026-11-12)",
+      },
     ]);
+  });
+
+  // #27: two directories connected to one project printed as identical lines.
+  it("tells apart two directories connected to the same project", async () => {
+    const { reportProjectCredentials } = await import("../../src/core/project-credential-status");
+    const first = binding("aaaa", "billing-api");
+    const second = { ...binding("bbbb", "billing-api"), abs_dir: "/work/billing-api-v2", real_dir: "/work/billing-api-v2" };
+
+    const rows = reportProjectCredentials([first, second], () => credential(60), NOW);
+
+    expect(rows.map((r) => r.label)).toEqual(["billing-api -> Acme (acme)", "billing-api -> Acme (acme)"]);
+    expect(rows.map((r) => r.dir)).toEqual(["/work/billing-api", "/work/billing-api-v2"]);
   });
 
   it("reads a corrupt record as no refusals", async () => {

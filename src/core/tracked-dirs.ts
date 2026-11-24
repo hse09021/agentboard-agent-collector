@@ -13,7 +13,14 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import type { Binding, CollectorConfigV2, DefaultScope, TrackedDir } from "./config-schema";
+import {
+  stripTrailingSlash,
+  type Binding,
+  type CollectorConfigV2,
+  type DefaultScope,
+  type ServerRef,
+  type TrackedDir,
+} from "./config-schema";
 import { normalizePath } from "./path-normalize";
 import { matchBinding } from "./routing";
 
@@ -90,12 +97,87 @@ export function setDefaultScope(config: CollectorConfigV2, scope: DefaultScope):
   return { ...config, default_scope: scope };
 }
 
-/** The default server's name for messages: its label, else its host. */
-export function defaultServerName(config: CollectorConfigV2): string {
-  if (config.default_server.label) return config.default_server.label;
+/**
+ * A server as messages name it: "label (host)", or the host alone when the
+ * label adds nothing (#27).
+ *
+ * An organization's server labels itself, typically with something like
+ * "Organization", which says nothing about where usage actually goes. The host
+ * is what tells the community server and an organization's apart.
+ */
+export function serverDisplayName(server: ServerRef): string {
+  let host = server.app_base_url;
+  let hostname = server.app_base_url;
   try {
-    return new URL(config.default_server.app_base_url).host;
+    const url = new URL(server.app_base_url);
+    host = url.host;
+    hostname = url.hostname;
   } catch {
-    return config.default_server.app_base_url;
+    /* not a URL; show it as it is */
   }
+  const label = server.label?.trim();
+  if (!label || label === host || label === hostname) return host;
+  return `${label} (${host})`;
+}
+
+/** The default server's name for messages. */
+export function defaultServerName(config: CollectorConfigV2): string {
+  return serverDisplayName(config.default_server);
+}
+
+/**
+ * Where unconnected directories' usage goes, as `status` and `doctor` both
+ * describe it, so the two cannot disagree (#27).
+ */
+export interface CollectionScopeSummary {
+  scope: DefaultScope;
+  /** The default server, as messages name it. */
+  server: string;
+  /** What happens to usage from a directory that is not connected. */
+  headline: string;
+  /**
+   * Set when the default server is also a connected project's server and
+   * something is sent there: the user logged in to their organization, so
+   * unconnected usage reaches it too.
+   */
+  note?: string;
+  /** Listed whatever the scope: in "all" they are kept but have no effect. */
+  tracked: TrackedDir[];
+  trackedHeading: string;
+}
+
+/** Uploads go to api_base_url, so that is what decides "the same server". */
+function sameServer(a: ServerRef, b: ServerRef): boolean {
+  return stripTrailingSlash(a.api_base_url) === stripTrailingSlash(b.api_base_url);
+}
+
+export function describeCollectionScope(config: CollectorConfigV2): CollectionScopeSummary {
+  const server = defaultServerName(config);
+  const listed = config.default_scope === "listed";
+
+  const sendsNothing = listed && config.tracked_dirs.length === 0;
+
+  let headline: string;
+  if (!listed) {
+    headline = `every directory not connected to an organization sends usage to ${server}`;
+  } else if (sendsNothing) {
+    headline = `no directory is tracked, so nothing goes to ${server}; run \`agentboard track <dir>\` to add one`;
+  } else {
+    headline = `only tracked directories send usage to ${server}; other unconnected directories send nothing`;
+  }
+
+  const sharesOrganization =
+    !sendsNothing && config.bindings.some((b) => sameServer(b.server, config.default_server));
+  const reaching = listed ? "tracked directories" : "unconnected directories";
+
+  return {
+    scope: config.default_scope,
+    server,
+    headline,
+    note: sharesOrganization
+      ? `${server} is also your connected projects' server: usage from ${reaching} reaches that organization too, outside any project`
+      : undefined,
+    tracked: config.tracked_dirs,
+    trackedHeading: listed ? "Tracked directories" : "Tracked directories (used only in listed scope)",
+  };
 }
