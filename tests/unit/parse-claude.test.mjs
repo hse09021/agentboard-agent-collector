@@ -2,13 +2,14 @@
  * Tests for plugin/hooks/claude/parse-claude.mjs
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   parseClaudeSession,
   convertLineCountedWatermark,
+  finalResponseWritten,
 } from '../../plugin/hooks/claude/parse-claude.mjs';
 
 let tmpDir;
@@ -550,5 +551,113 @@ describe('parseClaudeSession — bucket key per response', () => {
     const result = parseClaudeSession(file);
     expect(result.entries).toHaveLength(1);
     expect(result.totalTokens).toBe(15);
+  });
+});
+
+describe('finalResponseWritten — has the turn\'s last response reached the file (#25)', () => {
+  const prompt = { type: 'user', promptId: 'p1', message: { role: 'user', content: 'what is the price?' } };
+  const toolResult = {
+    type: 'user',
+    promptId: 'p1',
+    toolUseResult: { stdout: 'ok' },
+    message: { role: 'user', content: [{ type: 'tool_result', content: 'ok' }] },
+  };
+  const toolCall = makeAssistant({ stopReason: 'tool_use' });
+  const answer = makeAssistant({ stopReason: 'end_turn' });
+
+  it('is true once the response that ended the turn is written', () => {
+    expect(finalResponseWritten(writeTmpJsonl('done.jsonl', [prompt, toolCall, toolResult, answer]))).toBe(true);
+  });
+
+  it('is false while the newest response is still a tool call', () => {
+    expect(finalResponseWritten(writeTmpJsonl('call.jsonl', [prompt, toolCall]))).toBe(false);
+  });
+
+  it('is false while the newest line is a tool result', () => {
+    expect(finalResponseWritten(writeTmpJsonl('result.jsonl', [prompt, toolCall, toolResult]))).toBe(false);
+  });
+
+  // A turn answered in one response: the previous turn's answer must not pass
+  // for this one.
+  it('is false while the newest line is the prompt', () => {
+    expect(finalResponseWritten(writeTmpJsonl('prompt.jsonl', [prompt, answer, { ...prompt, promptId: 'p2' }]))).toBe(false);
+  });
+
+  it('looks past the bookkeeping Claude Code writes after an answer', () => {
+    const file = writeTmpJsonl('trailing.jsonl', [
+      prompt,
+      answer,
+      { type: 'system', subtype: 'stop_hook_summary' },
+      { type: 'attachment' },
+      { type: 'file-history-snapshot' },
+      { type: 'user', isMeta: true, message: { role: 'user', content: 'caveat' } },
+    ]);
+    expect(finalResponseWritten(file)).toBe(true);
+  });
+
+  it('skips a line still being written and a response line without a stop reason', () => {
+    const unfinished = makeAssistant();
+    unfinished.message.stop_reason = null;
+    const file = writeTmpJsonl('partial.jsonl', [prompt, toolCall, toolResult, unfinished]);
+    writeFileSync(file, '{"type":"assistant","message":{"stop_rea', { flag: 'a' });
+    expect(finalResponseWritten(file)).toBe(false);
+  });
+
+  it('ignores subagent lines in the parent transcript', () => {
+    expect(finalResponseWritten(writeTmpJsonl('side.jsonl', [prompt, toolCall, { ...answer, isSidechain: true }]))).toBe(false);
+  });
+
+  // An API error ends the turn with a synthetic message; nothing more comes.
+  it('accepts a synthetic error message as the end of the turn', () => {
+    const file = writeTmpJsonl('error.jsonl', [prompt, makeAssistant({ model: '<synthetic>', stopReason: 'stop_sequence' })]);
+    expect(finalResponseWritten(file)).toBe(true);
+  });
+
+  it('reads the whole file when the answer lies before a long tail', () => {
+    const file = writeTmpJsonl('long.jsonl', [prompt, answer, { type: 'attachment', blob: 'x'.repeat(5 * 1024 * 1024) }]);
+    expect(finalResponseWritten(file)).toBe(true);
+  });
+
+  it('is false for an empty transcript and null for a missing one', () => {
+    expect(finalResponseWritten(writeTmpJsonl('empty.jsonl', []))).toBe(false);
+    expect(finalResponseWritten(join(tmpDir, 'missing.jsonl'))).toBeNull();
+  });
+});
+
+// The collector never reads what was said. Every parsed entry's
+// message.content throws when touched; both readers must still work.
+describe('parse-claude privacy — message.content is never read', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('neither the parser nor the final-response check touches message.content', () => {
+    const toolCall = makeAssistant({ stopReason: 'tool_use', inputTokens: 10, outputTokens: 1 });
+    toolCall.message.content = [{ type: 'tool_use', name: 'Bash' }];
+    const answer = makeAssistant({ inputTokens: 20, outputTokens: 2 });
+    answer.message.content = [{ type: 'text', text: 'secret answer' }];
+    const file = writeTmpJsonl('private.jsonl', [
+      { type: 'user', message: { role: 'user', content: 'secret prompt' } },
+      toolCall,
+      { type: 'user', toolUseResult: {}, message: { role: 'user', content: [{ type: 'tool_result' }] } },
+      answer,
+    ]);
+
+    const parse = JSON.parse;
+    const touched = [];
+    vi.spyOn(JSON, 'parse').mockImplementation((text, reviver) => {
+      const value = parse(text, reviver);
+      if (value && typeof value.message === 'object' && value.message && 'content' in value.message) {
+        Object.defineProperty(value.message, 'content', {
+          get() {
+            touched.push(value.type);
+            throw new Error('message.content was read');
+          },
+        });
+      }
+      return value;
+    });
+
+    expect(finalResponseWritten(file)).toBe(true);
+    expect(parseClaudeSession(file).totalTokens).toBe(33);
+    expect(touched).toEqual([]);
   });
 });

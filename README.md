@@ -267,8 +267,12 @@ Claude Code 턴 종료(Stop) / 세션 종료(SessionEnd)
 plugin/hooks/claude/session-end.mjs   (stdin → 임시파일 저장, 즉시 종료)
       │
       ▼  (detached 프로세스)
-plugin/hooks/claude/worker.mjs        (Claude 수집 → 세션 락 → 파싱 → 델타 계산 → 업로드)
+plugin/hooks/claude/worker.mjs        (Claude 수집 → [Stop] 마지막 응답 기록 대기 → 세션 락 → 파싱 → 델타 계산 → 업로드)
       └── plugin/hooks/claude/parse-claude.mjs
+
+  ※ Claude Code는 transcript를 비동기로 기록하므로, Stop 훅이 그 턴의 마지막 응답이 기록되기 전에
+     실행될 수 있습니다. worker는 그 응답이 기록될 때까지 최대 2초 기다린 뒤 파싱합니다
+     (판정에는 응답 내용을 읽지 않음). 그래도 없으면 남은 몫은 다음 훅이 보냅니다.
 
 Codex 턴 종료(notify)          → plugin/hooks/codex/notify.mjs         (매 턴: 부모 세션 파싱 → 델타 → 업로드)
 Codex 세션 종료(SessionEnd)    → plugin/hooks/codex/session-end.mjs    (rate-limit 강제 캡처 + 부모 잔여 스윕)

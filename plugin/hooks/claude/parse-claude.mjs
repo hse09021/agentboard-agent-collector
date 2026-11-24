@@ -2,11 +2,12 @@
  * Claude Code JSONL session parser for hook scripts.
  *
  * Privacy: reads only message.usage, message.model and the message/request ids
- * from assistant entries with a stop_reason. The message.content field is never
- * accessed.
+ * from assistant entries with a stop_reason. finalResponseWritten additionally
+ * reads an entry's type, isSidechain and isMeta flags and message.stop_reason.
+ * The message.content field is never accessed.
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { TOKEN_FIELDS, addToDayBucket, sortDayBuckets } from '../lib/daily-split.mjs';
 import { contextSizeBucket, makeBucketKey } from '../lib/usage-buckets.mjs';
@@ -143,6 +144,80 @@ function readSessionFiles(transcriptPath) {
   }
 
   return filePaths.map(readTranscriptFile).filter(Boolean);
+}
+
+// ─── Has the turn's last response reached the file? ──────────────────────────
+
+// Enough to reach past the request blobs and attachments Claude Code writes
+// around a response. A transcript whose answer lies further back is read whole.
+const TAIL_BYTES = 4 * 1024 * 1024;
+
+function readTail(filePath, bytes) {
+  const fd = openSync(filePath, 'r');
+  try {
+    const { size } = fstatSync(fd);
+    const start = Math.max(0, size - bytes);
+    const buffer = Buffer.alloc(size - start);
+    readSync(fd, buffer, 0, buffer.length, start);
+    return { text: buffer.toString('utf-8'), whole: start === 0 };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Reads the lines from the end, stopping at the first one that tells: a
+ * response that ended the turn (true), or a response that called a tool or a
+ * user line, either of which must still be answered (false). Undefined when
+ * no line tells.
+ */
+function lastLineEndsTurn(lines) {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue; // the line being written, or the cut at the start of a tail
+    }
+    if (!entry || typeof entry !== 'object' || entry.isSidechain === true) continue;
+
+    if (entry.type === 'assistant') {
+      const message = entry.message && typeof entry.message === 'object' ? entry.message : null;
+      const stopReason = message ? message.stop_reason : null;
+      // A line written before its response finished carries no stop reason.
+      if (!stopReason) continue;
+      return stopReason !== 'tool_use';
+    }
+    // The prompt, or a tool result: a response still has to follow it.
+    if (entry.type === 'user' && entry.isMeta !== true) return false;
+  }
+  return undefined;
+}
+
+/**
+ * Whether the response that ended the latest turn has been written to the
+ * transcript (#25).
+ *
+ * Claude Code writes the transcript asynchronously, and the Stop hook can fire
+ * before the turn's last response is on disk. Parsed then, the upload misses
+ * that response, and it is only sent with the next hook. The turn is over when
+ * Stop fires, so its last response cannot have stopped to call a tool: if the
+ * newest response or user line is a tool call, a tool result or the prompt,
+ * the answer is still on its way.
+ *
+ * Returns true or false, or null when the transcript cannot be read.
+ */
+export function finalResponseWritten(transcriptPath) {
+  try {
+    const tail = readTail(transcriptPath, TAIL_BYTES);
+    const decided = lastLineEndsTurn(tail.text.split('\n'));
+    if (decided !== undefined || tail.whole) return decided ?? false;
+    return lastLineEndsTurn(readFileSync(transcriptPath, 'utf-8').split('\n')) ?? false;
+  } catch {
+    return null;
+  }
 }
 
 /**
